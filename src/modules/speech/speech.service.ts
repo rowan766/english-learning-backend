@@ -2,17 +2,17 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PollyClient, SynthesizeSpeechCommand } from '@aws-sdk/client-polly';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { CacheService } from '../cache/cache.service';
 import { GenerateSpeechDto, SpeechResponseDto, VoiceId, OutputFormat } from './dto/generate-speech.dto';
 import { v4 as uuidv4 } from 'uuid';
+import * as fs from 'fs';
+import * as path from 'path';
 
 @Injectable()
 export class SpeechService {
   private readonly logger = new Logger(SpeechService.name);
   private readonly pollyClient: PollyClient;
-  private readonly s3Client: S3Client;
-  private readonly bucketName: string;
+  private readonly audioDir: string;
 
   constructor(
     private readonly configService: ConfigService,
@@ -22,7 +22,7 @@ export class SpeechService {
     const accessKeyId = this.configService.get<string>('aws.accessKeyId');
     const secretAccessKey = this.configService.get<string>('aws.secretAccessKey');
 
-    // 增强的AWS配置，添加超时和重试设置
+    // AWS Polly配置
     const awsConfig = {
       region,
       requestTimeout: 120000,     // 2分钟请求超时
@@ -38,8 +38,20 @@ export class SpeechService {
     };
 
     this.pollyClient = new PollyClient(awsConfig);
-    this.s3Client = new S3Client(awsConfig);
-    this.bucketName = this.configService.get<string>('aws.s3.bucketName') || 'english-learning-audio';
+    
+    // 设置本地音频存储目录
+    this.audioDir = path.join(process.cwd(), 'public', 'audio');
+    this.ensureAudioDirectoryExists();
+  }
+
+  /**
+   * 确保音频目录存在
+   */
+  private ensureAudioDirectoryExists(): void {
+    if (!fs.existsSync(this.audioDir)) {
+      fs.mkdirSync(this.audioDir, { recursive: true });
+      this.logger.log(`创建音频目录: ${this.audioDir}`);
+    }
   }
 
   /**
@@ -54,8 +66,15 @@ export class SpeechService {
     // 检查缓存
     const cached = this.cacheService.get<SpeechResponseDto>(cacheKey);
     if (cached) {
-      this.logger.log(`从缓存获取语音: ${cacheKey}`);
-      return cached;
+      // 检查文件是否还存在
+      const filePath = this.getAudioFilePath(cached.fileName, outputFormat);
+      if (fs.existsSync(filePath)) {
+        this.logger.log(`从缓存获取语音: ${cacheKey}`);
+        return cached;
+      } else {
+        // 文件不存在，清除缓存
+        this.cacheService.delete(cacheKey);
+      }
     }
 
     try {
@@ -64,10 +83,9 @@ export class SpeechService {
       // 使用AWS Polly生成语音
       const audioData = await this.synthesizeSpeech(text, voiceId, outputFormat);
 
-      // 上传到S3
+      // 保存到本地文件
       const audioFileName = fileName || `speech_${uuidv4()}`;
-      const s3Key = `${audioFileName}.${outputFormat}`;
-      const audioUrl = await this.uploadToS3(audioData, s3Key, outputFormat);
+      const audioUrl = await this.saveToLocal(audioData, audioFileName, outputFormat);
 
       // 估算音频时长 (粗略计算：约每分钟150个单词)
       const wordCount = text.split(' ').length;
@@ -155,71 +173,39 @@ export class SpeechService {
   }
 
   /**
-   * 上传音频到S3
+   * 保存音频到本地文件
    */
-  private async uploadToS3(
+  private async saveToLocal(
     audioData: Uint8Array,
-    key: string,
+    fileName: string,
     outputFormat: OutputFormat,
   ): Promise<string> {
-    this.logger.log(`开始上传到S3: ${key}，文件大小: ${audioData.length} 字节`);
+    const fullFileName = `${fileName}.${outputFormat}`;
+    const filePath = this.getAudioFilePath(fileName, outputFormat);
     
-    const contentType = this.getContentType(outputFormat);
-
-    // 增加S3上传的重试机制
-    let retryCount = 0;
-    const maxRetries = 3;
+    this.logger.log(`开始保存到本地: ${filePath}，文件大小: ${audioData.length} 字节`);
     
-    while (retryCount < maxRetries) {
-      try {
-        const command = new PutObjectCommand({
-          Bucket: this.bucketName,
-          Key: key,
-          Body: audioData,
-          ContentType: contentType,
-          ACL: 'public-read', // 设置为公开可读
-        });
-
-        await this.s3Client.send(command);
-
-        // 返回S3对象的公开URL
-        const region = this.configService.get<string>('aws.s3.region');
-        const audioUrl = `https://${this.bucketName}.s3.${region}.amazonaws.com/${key}`;
-        
-        this.logger.log(`S3上传成功: ${audioUrl}`);
-        return audioUrl;
-        
-      } catch (error) {
-        retryCount++;
-        this.logger.warn(`S3上传失败，重试 ${retryCount}/${maxRetries}: ${error.message}`);
-        
-        if (retryCount >= maxRetries) {
-          throw error;
-        }
-        
-        // 等待后重试
-        await new Promise<void>(resolve => setTimeout(resolve, 2000 * retryCount));
-      }
+    try {
+      // 写入文件
+      fs.writeFileSync(filePath, audioData);
+      
+      // 返回可访问的URL（相对于静态文件服务的路径）
+      const audioUrl = `/audio/${fullFileName}`;
+      
+      this.logger.log(`本地保存成功: ${audioUrl}`);
+      return audioUrl;
+      
+    } catch (error) {
+      this.logger.error(`本地保存失败: ${error.message}`, error.stack);
+      throw new Error(`音频文件保存失败: ${error.message}`);
     }
-    
-    // TypeScript要求的返回语句（虽然永远不会执行到这里）
-    throw new Error('S3上传失败，已达到最大重试次数');
   }
 
   /**
-   * 获取内容类型
+   * 获取音频文件完整路径
    */
-  private getContentType(outputFormat: OutputFormat): string {
-    switch (outputFormat) {
-      case OutputFormat.MP3:
-        return 'audio/mpeg';
-      case OutputFormat.OGG_VORBIS:
-        return 'audio/ogg';
-      case OutputFormat.PCM:
-        return 'audio/pcm';
-      default:
-        return 'audio/mpeg';
-    }
+  private getAudioFilePath(fileName: string, outputFormat: OutputFormat): string {
+    return path.join(this.audioDir, `${fileName}.${outputFormat}`);
   }
 
   /**
