@@ -5,18 +5,22 @@ import {
   Body, 
   UseInterceptors, 
   UploadedFile,
+  UploadedFiles,
   BadRequestException,
   HttpStatus,
   HttpCode
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiOperation, ApiResponse, ApiConsumes, ApiBody } from '@nestjs/swagger';
 import { DocumentService } from './document.service';
+import { Express } from 'express';
 import { 
   ProcessDocumentDto, 
   DocumentResponseDto, 
   DocumentType,
-  ProcessDocumentWithAudioDto
+  ProcessDocumentWithAudioDto,
+  DocumentAudioMatchDto,
+  DocumentAudioMatchResponseDto
 } from './dto/process-document.dto';
 
 @ApiTags('document')
@@ -241,9 +245,152 @@ export class DocumentController {
   }
 
   /**
-   * 获取不带扩展名的文件名
-   */
+ * 获取不带扩展名的文件名
+ */
   private getFileNameWithoutExtension(filename: string): string {
     return filename.replace(/\.[^/.]+$/, '');
+  }
+
+  /**
+ * 检查是否为文档文件
+ */
+private isDocumentFile(file: Express.Multer.File): boolean {
+  const documentMimeTypes = [
+    'text/plain',
+    'application/pdf',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  ];
+  
+  if (documentMimeTypes.includes(file.mimetype)) {
+    return true;
+  }
+  
+  const extension = file.originalname.toLowerCase().split('.').pop();
+  return ['txt', 'pdf', 'doc', 'docx'].includes(extension || '');
+}
+
+  /**
+   * 检查是否为音频文件
+   */
+  private isAudioFile(file: Express.Multer.File): boolean {
+    const audioMimeTypes = [
+      'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/wave',
+      'audio/x-wav', 'audio/mp4', 'audio/m4a', 'audio/aac',
+      'audio/ogg', 'audio/webm'
+    ];
+    
+    if (audioMimeTypes.includes(file.mimetype)) {
+      return true;
+    }
+    
+    const extension = file.originalname.toLowerCase().split('.').pop();
+    return ['mp3', 'wav', 'wave', 'm4a', 'aac', 'ogg', 'webm'].includes(extension || '');
+  }
+
+  /**
+   * 上传文档和音频进行智能匹配
+   */
+  @Post('match-with-audio')
+  @HttpCode(HttpStatus.OK)
+  @UseInterceptors(FilesInterceptor('files', 2)) // 接受2个文件
+  @ApiOperation({ 
+    summary: '文档音频智能匹配', 
+    description: '同时上传文档和音频文件，自动建立段落与音频片段的对应关系' 
+  })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    description: '文档和音频文件上传',
+    schema: {
+      type: 'object',
+      properties: {
+        files: {
+          type: 'array',
+          items: {
+            type: 'string',
+            format: 'binary'
+          },
+          description: '文档文件（.txt/.pdf/.docx）和音频文件（.mp3/.wav/.m4a等）'
+        },
+        title: {
+          type: 'string',
+          description: '文档标题'
+        },
+        segmentStrategy: {
+          type: 'string',
+          enum: ['silence', 'time', 'manual'],
+          description: '音频分段策略',
+          default: 'silence'
+        },
+        segmentDuration: {
+          type: 'number',
+          description: '时间分段时长（秒），strategy为time时使用',
+          default: 30
+        },
+        silenceThreshold: {
+          type: 'number',
+          description: '静音检测阈值（0-1），strategy为silence时使用',
+          default: 0.01
+        },
+        minSilenceDuration: {
+          type: 'number',
+          description: '最小静音时长（秒），strategy为silence时使用',
+          default: 1.0
+        }
+      },
+      required: ['files']
+    }
+  })
+  @ApiResponse({ status: 200, description: '匹配成功', type: DocumentAudioMatchResponseDto })
+  @ApiResponse({ status: 400, description: '文件格式不支持或匹配失败' })
+  async matchDocumentWithAudio(
+    @UploadedFiles() files: Express.Multer.File[],
+    @Body('title') title?: string,
+    @Body('segmentStrategy') segmentStrategy?: string,
+    @Body('segmentDuration') segmentDuration?: string,
+    @Body('silenceThreshold') silenceThreshold?: string,
+    @Body('minSilenceDuration') minSilenceDuration?: string
+  ): Promise<DocumentAudioMatchResponseDto> {
+    if (!files || files.length !== 2) {
+      throw new BadRequestException('请同时上传文档文件和音频文件（共2个文件）');
+    }
+
+    // 分别识别文档文件和音频文件
+    let documentFile: Express.Multer.File | null = null;
+    let audioFile: Express.Multer.File | null = null;
+
+    for (const file of files) {
+      if (this.isDocumentFile(file)) {
+        documentFile = file;
+      } else if (this.isAudioFile(file)) {
+        audioFile = file;
+      }
+    }
+
+    if (!documentFile) {
+      throw new BadRequestException('未找到有效的文档文件（支持 .txt、.pdf、.docx）');
+    }
+
+    if (!audioFile) {
+      throw new BadRequestException('未找到有效的音频文件（支持 .mp3、.wav、.m4a 等）');
+    }
+
+    // 构建匹配选项
+    const matchOptions: DocumentAudioMatchDto = {
+      title: title || this.getFileNameWithoutExtension(documentFile.originalname),
+      documentType: this.getDocumentType(documentFile.mimetype, documentFile.originalname)?? DocumentType.TEXT,
+      segmentStrategy: (segmentStrategy as any) || 'silence',
+      segmentDuration: segmentDuration ? parseFloat(segmentDuration) : 30,
+      silenceThreshold: silenceThreshold ? parseFloat(silenceThreshold) : 0.01,
+      minSilenceDuration: minSilenceDuration ? parseFloat(minSilenceDuration) : 1.0,
+    };
+
+    return await this.documentService.matchDocumentWithAudio(
+      documentFile.buffer,
+      audioFile.buffer,
+      documentFile.originalname,
+      audioFile.originalname,
+      matchOptions
+    );
   }
 }

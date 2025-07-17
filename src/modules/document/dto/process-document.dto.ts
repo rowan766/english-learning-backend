@@ -114,3 +114,84 @@ export class ProcessDocumentWithAudioDto extends ProcessDocumentDto {
   @IsString()
   outputFormat?: string;
 }
+
+// 音频段落信息
+export class AudioSegmentDto {
+  @ApiProperty({ description: '音频段落ID' })
+  id: string;
+
+  @ApiProperty({ description: '开始时间（秒）' })
+  startTime: number;
+
+  @ApiProperty({ description: '结束时间（秒）' })
+  endTime: number;
+
+  @ApiProperty({ description: '段落音频文件URL' })
+  segmentAudioUrl: string;
+
+  @ApiProperty({ description: '音频时长（秒）' })
+  duration: number;
+
+  @ApiProperty({ description: '段落顺序' })
+  order: number;
+}
+
+// 文档与音频匹配的DTO
+export class DocumentAudioMatchDto {
+  @ApiProperty({ description: '文档标题' })
+  @IsString()
+  title: string;
+
+  @ApiPropertyOptional({ description: '文档类型', enum: DocumentType })
+  @IsOptional()
+  @IsEnum(DocumentType)
+  documentType?: DocumentType;
+
+  @ApiPropertyOptional({ 
+    description: '音频分段策略',
+    enum: ['silence', 'time', 'manual'],
+    example: 'silence'
+  })
+  @IsOptional()
+  @IsString()
+  segmentStrategy?: 'silence' | 'time' | 'manual';
+
+  @ApiPropertyOptional({ 
+    description: '时间分段时长（秒），当策略为time时使用',
+    example: 30
+  })
+  @IsOptional()
+  segmentDuration?: number;
+
+  @ApiPropertyOptional({ 
+    description: '静音检测阈值（0-1），当策略为silence时使用',
+    example: 0.01
+  })
+  @IsOptional()
+  silenceThreshold?: number;
+
+  @ApiPropertyOptional({ 
+    description: '最小静音时长（秒），当策略为silence时使用',
+    example: 1.0
+  })
+  @IsOptional()
+  minSilenceDuration?: number;
+}
+
+// 匹配结果的响应DTO
+export class DocumentAudioMatchResponseDto extends DocumentResponseDto {
+  @ApiProperty({ description: '原始音频文件URL' })
+  originalAudioUrl: string;
+
+  @ApiProperty({ description: '原始音频时长（秒）' })
+  originalAudioDuration: number;
+
+  @ApiProperty({ description: '音频段落列表', type: [AudioSegmentDto] })
+  audioSegments: AudioSegmentDto[];
+
+  @ApiProperty({ description: '匹配策略' })
+  matchStrategy: string;
+
+  @ApiProperty({ description: '是否需要手动调整匹配' })
+  needsManualAdjustment: boolean;
+}
