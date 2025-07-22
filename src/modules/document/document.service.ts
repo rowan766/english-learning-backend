@@ -16,13 +16,15 @@ import {
 import { v4 as uuidv4 } from 'uuid';
 import * as mammoth from 'mammoth';
 import * as pdfParse from 'pdf-parse';
+import * as fs from 'fs';
+import * as path from 'path';
 
 @Injectable()
 export class DocumentService {
   private readonly logger = new Logger(DocumentService.name);
 
   constructor(
-    private readonly prisma: PrismaService,  // 替换 CacheService
+    private readonly prisma: PrismaService,
     private readonly speechService: SpeechService,
     private readonly audioProcessingService: AudioProcessingService,
   ) {}
@@ -157,10 +159,12 @@ export class DocumentService {
   }
 
   /**
-   * 获取所有文档列表
+   * 获取文档列表（支持分页）
    */
-  async getDocumentList(): Promise<DocumentResponseDto[]> {
+  async getDocumentList(skip: number = 0, take: number = 10): Promise<DocumentResponseDto[]> {
     const documents = await this.prisma.document.findMany({
+      skip,
+      take,
       include: {
         paragraphs: {
           orderBy: { orderNum: 'asc' }
@@ -173,6 +177,39 @@ export class DocumentService {
     });
 
     return documents.map(doc => this.formatDocumentResponse(doc));
+  }
+
+  /**
+   * 删除文档及其关联数据
+   */
+  async deleteDocument(id: string): Promise<boolean> {
+    try {
+      const document = await this.prisma.document.findUnique({
+        where: { id },
+        include: {
+          paragraphs: true,
+          audioSegments: true
+        }
+      });
+
+      if (!document) {
+        return false;
+      }
+
+      // 删除关联的音频文件
+      await this.deleteAssociatedAudioFiles(document);
+
+      // 删除数据库记录（级联删除会自动删除相关的段落和音频片段）
+      await this.prisma.document.delete({
+        where: { id }
+      });
+
+      this.logger.log(`文档删除成功: ${id}`);
+      return true;
+    } catch (error) {
+      this.logger.error(`删除文档失败: ${error.message}`, error.stack);
+      throw new Error(`删除文档失败: ${error.message}`);
+    }
   }
 
   /**
@@ -244,6 +281,58 @@ export class DocumentService {
   }
 
   // =================== 私有方法 ===================
+
+  /**
+   * 删除关联的音频文件
+   */
+  private async deleteAssociatedAudioFiles(document: any): Promise<void> {
+    const audioDir = path.join(process.cwd(), 'public', 'audio');
+    
+    // 删除段落相关的音频文件
+    for (const paragraph of document.paragraphs || []) {
+      if (paragraph.audioFileName) {
+        const audioFilePath = path.join(audioDir, `${paragraph.audioFileName}.mp3`);
+        try {
+          if (fs.existsSync(audioFilePath)) {
+            fs.unlinkSync(audioFilePath);
+            this.logger.log(`删除段落音频文件: ${audioFilePath}`);
+          }
+        } catch (error) {
+          this.logger.warn(`删除段落音频文件失败: ${audioFilePath}, ${error.message}`);
+        }
+      }
+    }
+
+    // 删除音频片段文件
+    for (const audioSegment of document.audioSegments || []) {
+      if (audioSegment.segmentAudioUrl) {
+        const fileName = audioSegment.segmentAudioUrl.replace('/audio/', '');
+        const audioFilePath = path.join(audioDir, fileName);
+        try {
+          if (fs.existsSync(audioFilePath)) {
+            fs.unlinkSync(audioFilePath);
+            this.logger.log(`删除音频片段文件: ${audioFilePath}`);
+          }
+        } catch (error) {
+          this.logger.warn(`删除音频片段文件失败: ${audioFilePath}, ${error.message}`);
+        }
+      }
+    }
+
+    // 删除原始音频文件
+    if (document.originalAudioUrl) {
+      const fileName = document.originalAudioUrl.replace('/audio/', '');
+      const audioFilePath = path.join(audioDir, fileName);
+      try {
+        if (fs.existsSync(audioFilePath)) {
+          fs.unlinkSync(audioFilePath);
+          this.logger.log(`删除原始音频文件: ${audioFilePath}`);
+        }
+      } catch (error) {
+        this.logger.warn(`删除原始音频文件失败: ${audioFilePath}, ${error.message}`);
+      }
+    }
+  }
 
   /**
    * 解析文档内容

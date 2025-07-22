@@ -2,16 +2,22 @@
 import { 
   Controller, 
   Post, 
+  Get,
+  Delete,
   Body, 
+  Param,
+  Query,
   UseInterceptors, 
   UploadedFile,
   UploadedFiles,
   BadRequestException,
   HttpStatus,
-  HttpCode
+  HttpCode,
+  ParseIntPipe,
+  DefaultValuePipe
 } from '@nestjs/common';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
-import { ApiTags, ApiOperation, ApiResponse, ApiConsumes, ApiBody } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiConsumes, ApiBody, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { DocumentService } from './document.service';
 import { Express } from 'express';
 import { 
@@ -27,6 +33,117 @@ import {
 @Controller('document')
 export class DocumentController {
   constructor(private readonly documentService: DocumentService) {}
+
+  /**
+   * 获取所有文档列表
+   */
+  @Get()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ 
+    summary: '获取文档列表', 
+    description: '分页获取所有文档记录' 
+  })
+  @ApiQuery({ 
+    name: 'page', 
+    required: false, 
+    type: Number, 
+    description: '页码，从1开始',
+    example: 1
+  })
+  @ApiQuery({ 
+    name: 'limit', 
+    required: false, 
+    type: Number, 
+    description: '每页数量，最大50',
+    example: 10
+  })
+  @ApiResponse({ 
+    status: 200, 
+    description: '获取成功', 
+    type: [DocumentResponseDto] 
+  })
+  async getAllDocuments(
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query('limit', new DefaultValuePipe(10), ParseIntPipe) limit: number
+  ): Promise<DocumentResponseDto[]> {
+    // 限制每页最大数量
+    const take = Math.min(limit, 50);
+    const skip = (page - 1) * take;
+    
+    return await this.documentService.getDocumentList(skip, take);
+  }
+
+  /**
+   * 根据ID获取文档详情
+   */
+  @Get(':id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ 
+    summary: '获取文档详情', 
+    description: '根据ID获取特定文档的详细信息' 
+  })
+  @ApiParam({ 
+    name: 'id', 
+    description: '文档ID',
+    example: 'uuid-format-string'
+  })
+  @ApiResponse({ 
+    status: 200, 
+    description: '获取成功', 
+    type: DocumentResponseDto 
+  })
+  @ApiResponse({ 
+    status: 404, 
+    description: '文档未找到' 
+  })
+  async getDocumentById(@Param('id') id: string): Promise<DocumentResponseDto> {
+    return await this.documentService.getDocumentById(id);
+  }
+
+  /**
+   * 删除文档
+   */
+  @Delete(':id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ 
+    summary: '删除文档', 
+    description: '删除指定的文档及其所有关联数据' 
+  })
+  @ApiParam({ 
+    name: 'id', 
+    description: '文档ID',
+    example: 'uuid-format-string'
+  })
+  @ApiResponse({ 
+    status: 200, 
+    description: '删除成功',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean', example: true },
+        message: { type: 'string', example: '文档删除成功' }
+      }
+    }
+  })
+  @ApiResponse({ 
+    status: 404, 
+    description: '文档未找到' 
+  })
+  async deleteDocument(@Param('id') id: string): Promise<{ success: boolean; message: string }> {
+    const result = await this.documentService.deleteDocument(id);
+    
+    if (result) {
+      return {
+        success: true,
+        message: '文档删除成功'
+      };
+    } else {
+      return {
+        success: false,
+        message: '文档未找到'
+      };
+    }
+  }
 
   /**
    * 处理文本内容
@@ -193,102 +310,6 @@ export class DocumentController {
   }
 
   /**
-   * 根据MIME类型和文件名确定文档类型
-   */
-  private getDocumentType(mimetype: string, filename: string): DocumentType | null {
-    // 首先根据MIME类型判断
-    switch (mimetype) {
-      case 'text/plain':
-        return DocumentType.TEXT;
-      case 'application/pdf':
-        return DocumentType.PDF;
-      case 'application/msword':
-      case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
-        return DocumentType.WORD;
-    }
-
-    // 如果MIME类型无法识别，根据文件扩展名判断
-    const extension = filename.toLowerCase().split('.').pop();
-    switch (extension) {
-      case 'txt':
-        return DocumentType.TEXT;
-      case 'pdf':
-        return DocumentType.PDF;
-      case 'doc':
-      case 'docx':
-        return DocumentType.WORD;
-      default:
-        return null;
-    }
-  }
-
-  /**
-   * 从文件中提取文本内容
-   */
-  private async extractTextFromFile(
-    file: Express.Multer.File, 
-    type: DocumentType
-  ): Promise<string> {
-    switch (type) {
-      case DocumentType.TEXT:
-        return file.buffer.toString('utf-8');
-      
-      case DocumentType.PDF:
-        return await this.documentService.extractPdfText(file.buffer);
-      
-      case DocumentType.WORD:
-        return await this.documentService.extractWordText(file.buffer);
-      
-      default:
-        throw new BadRequestException('不支持的文档类型');
-    }
-  }
-
-  /**
- * 获取不带扩展名的文件名
- */
-  private getFileNameWithoutExtension(filename: string): string {
-    return filename.replace(/\.[^/.]+$/, '');
-  }
-
-  /**
- * 检查是否为文档文件
- */
-private isDocumentFile(file: Express.Multer.File): boolean {
-  const documentMimeTypes = [
-    'text/plain',
-    'application/pdf',
-    'application/msword',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-  ];
-  
-  if (documentMimeTypes.includes(file.mimetype)) {
-    return true;
-  }
-  
-  const extension = file.originalname.toLowerCase().split('.').pop();
-  return ['txt', 'pdf', 'doc', 'docx'].includes(extension || '');
-}
-
-  /**
-   * 检查是否为音频文件
-   */
-  private isAudioFile(file: Express.Multer.File): boolean {
-    const audioMimeTypes = [
-      'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/wave',
-      'audio/x-wav', 'audio/mp4', 'audio/m4a', 'audio/aac',
-      'audio/ogg', 'audio/webm'
-    ];
-    
-    if (audioMimeTypes.includes(file.mimetype)) {
-      return true;
-    }
-    
-    const extension = file.originalname.toLowerCase().split('.').pop();
-    return ['mp3', 'wav', 'wave', 'm4a', 'aac', 'ogg', 'webm'].includes(extension || '');
-  }
-
-  /**
    * 上传文档和音频进行智能匹配
    */
   @Post('match-with-audio')
@@ -378,7 +399,7 @@ private isDocumentFile(file: Express.Multer.File): boolean {
     // 构建匹配选项
     const matchOptions: DocumentAudioMatchDto = {
       title: title || this.getFileNameWithoutExtension(documentFile.originalname),
-      documentType: this.getDocumentType(documentFile.mimetype, documentFile.originalname)?? DocumentType.TEXT,
+      documentType: this.getDocumentType(documentFile.mimetype, documentFile.originalname) ?? DocumentType.TEXT,
       segmentStrategy: (segmentStrategy as any) || 'silence',
       segmentDuration: segmentDuration ? parseFloat(segmentDuration) : 30,
       silenceThreshold: silenceThreshold ? parseFloat(silenceThreshold) : 0.01,
@@ -392,5 +413,103 @@ private isDocumentFile(file: Express.Multer.File): boolean {
       audioFile.originalname,
       matchOptions
     );
+  }
+
+  // =================== 私有方法 ===================
+
+  /**
+   * 根据MIME类型和文件名确定文档类型
+   */
+  private getDocumentType(mimetype: string, filename: string): DocumentType | null {
+    // 首先根据MIME类型判断
+    switch (mimetype) {
+      case 'text/plain':
+        return DocumentType.TEXT;
+      case 'application/pdf':
+        return DocumentType.PDF;
+      case 'application/msword':
+      case 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+        return DocumentType.WORD;
+    }
+
+    // 如果MIME类型无法识别，根据文件扩展名判断
+    const extension = filename.toLowerCase().split('.').pop();
+    switch (extension) {
+      case 'txt':
+        return DocumentType.TEXT;
+      case 'pdf':
+        return DocumentType.PDF;
+      case 'doc':
+      case 'docx':
+        return DocumentType.WORD;
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * 从文件中提取文本内容
+   */
+  private async extractTextFromFile(
+    file: Express.Multer.File, 
+    type: DocumentType
+  ): Promise<string> {
+    switch (type) {
+      case DocumentType.TEXT:
+        return file.buffer.toString('utf-8');
+      
+      case DocumentType.PDF:
+        return await this.documentService.extractPdfText(file.buffer);
+      
+      case DocumentType.WORD:
+        return await this.documentService.extractWordText(file.buffer);
+      
+      default:
+        throw new BadRequestException('不支持的文档类型');
+    }
+  }
+
+  /**
+   * 获取不带扩展名的文件名
+   */
+  private getFileNameWithoutExtension(filename: string): string {
+    return filename.replace(/\.[^/.]+$/, '');
+  }
+
+  /**
+   * 检查是否为文档文件
+   */
+  private isDocumentFile(file: Express.Multer.File): boolean {
+    const documentMimeTypes = [
+      'text/plain',
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    ];
+    
+    if (documentMimeTypes.includes(file.mimetype)) {
+      return true;
+    }
+    
+    const extension = file.originalname.toLowerCase().split('.').pop();
+    return ['txt', 'pdf', 'doc', 'docx'].includes(extension || '');
+  }
+
+  /**
+   * 检查是否为音频文件
+   */
+  private isAudioFile(file: Express.Multer.File): boolean {
+    const audioMimeTypes = [
+      'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/wave',
+      'audio/x-wav', 'audio/mp4', 'audio/m4a', 'audio/aac',
+      'audio/ogg', 'audio/webm'
+    ];
+    
+    if (audioMimeTypes.includes(file.mimetype)) {
+      return true;
+    }
+    
+    const extension = file.originalname.toLowerCase().split('.').pop();
+    return ['mp3', 'wav', 'wave', 'm4a', 'aac', 'ogg', 'webm'].includes(extension || '');
   }
 }

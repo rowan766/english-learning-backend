@@ -2,7 +2,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PollyClient, SynthesizeSpeechCommand } from '@aws-sdk/client-polly';
-import { CacheService } from '../cache/cache.service';
+import { PrismaService } from '../../prisma/prisma.service';
 import { GenerateSpeechDto, SpeechResponseDto, VoiceId, OutputFormat } from './dto/generate-speech.dto';
 import { v4 as uuidv4 } from 'uuid';
 import * as fs from 'fs';
@@ -16,7 +16,7 @@ export class SpeechService {
 
   constructor(
     private readonly configService: ConfigService,
-    private readonly cacheService: CacheService,
+    private readonly prisma: PrismaService,  // 使用Prisma替代缓存
   ) {
     const region = this.configService.get<string>('aws.region');
     const accessKeyId = this.configService.get<string>('aws.accessKeyId');
@@ -60,20 +60,22 @@ export class SpeechService {
   async generateSpeech(generateSpeechDto: GenerateSpeechDto): Promise<SpeechResponseDto> {
     const { text, voiceId = VoiceId.JOANNA, outputFormat = OutputFormat.MP3, fileName } = generateSpeechDto;
 
-    // 生成缓存键
+    // 生成缓存键用于数据库查找
     const cacheKey = this.generateCacheKey(text, voiceId, outputFormat);
 
-    // 检查缓存
-    const cached = this.cacheService.get<SpeechResponseDto>(cacheKey);
-    if (cached) {
+    // 检查数据库中是否已存在相同的语音记录
+    const existingSpeech = await this.findExistingSpeech(cacheKey);
+    if (existingSpeech) {
       // 检查文件是否还存在
-      const filePath = this.getAudioFilePath(cached.fileName, outputFormat);
+      const filePath = this.getAudioFilePath(existingSpeech.fileName, outputFormat);
       if (fs.existsSync(filePath)) {
-        this.logger.log(`从缓存获取语音: ${cacheKey}`);
-        return cached;
+        this.logger.log(`从数据库获取语音: ${existingSpeech.fileName}`);
+        return this.formatSpeechResponse(existingSpeech);
       } else {
-        // 文件不存在，清除缓存
-        this.cacheService.delete(cacheKey);
+        // 文件不存在，删除数据库记录
+        await this.prisma.speechRecord.delete({
+          where: { id: existingSpeech.id }
+        });
       }
     }
 
@@ -91,21 +93,23 @@ export class SpeechService {
       const wordCount = text.split(' ').length;
       const estimatedDuration = Math.round((wordCount / 150) * 60);
 
-      const result: SpeechResponseDto = {
-        audioUrl,
-        fileName: audioFileName,
-        duration: estimatedDuration,
-        voiceId,
-        outputFormat,
-        originalText: text,
-        createdAt: new Date(),
-      };
-
-      // 存入缓存
-      // this.cacheService.set(cacheKey, result);
+      // 保存记录到数据库
+      const speechRecord = await this.prisma.speechRecord.create({
+        data: {
+          id: uuidv4(),
+          cacheKey,
+          fileName: audioFileName,
+          audioUrl,
+          duration: estimatedDuration,
+          voiceId,
+          outputFormat,
+          originalText: text,
+          wordCount,
+        }
+      });
 
       this.logger.log(`语音生成成功: ${audioFileName}`);
-      return result;
+      return this.formatSpeechResponse(speechRecord);
     } catch (error) {
       this.logger.error(`语音生成失败: ${error.message}`, error.stack);
       
@@ -116,6 +120,93 @@ export class SpeechService {
       
       throw new Error(`语音生成失败: ${error.message}`);
     }
+  }
+
+  /**
+   * 根据ID获取语音记录
+   */
+  async getSpeechById(id: string): Promise<SpeechResponseDto> {
+    const speechRecord = await this.prisma.speechRecord.findUnique({
+      where: { id }
+    });
+
+    if (!speechRecord) {
+      throw new Error(`语音记录未找到: ${id}`);
+    }
+
+    return this.formatSpeechResponse(speechRecord);
+  }
+
+  /**
+   * 获取所有语音记录
+   */
+  async getAllSpeeches(skip: number = 0, take: number = 20): Promise<SpeechResponseDto[]> {
+    const speechRecords = await this.prisma.speechRecord.findMany({
+      skip,
+      take,
+      orderBy: { createdAt: 'desc' }
+    });
+
+    return speechRecords.map(record => this.formatSpeechResponse(record));
+  }
+
+  /**
+   * 删除语音记录
+   */
+  async deleteSpeech(id: string): Promise<boolean> {
+    try {
+      const speechRecord = await this.prisma.speechRecord.findUnique({
+        where: { id }
+      });
+
+      if (speechRecord) {
+        // 删除本地文件
+        const filePath = this.getAudioFilePath(speechRecord.fileName, speechRecord.outputFormat as OutputFormat);
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+          this.logger.log(`删除音频文件: ${filePath}`);
+        }
+
+        // 删除数据库记录
+        await this.prisma.speechRecord.delete({
+          where: { id }
+        });
+
+        this.logger.log(`语音记录删除成功: ${id}`);
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      this.logger.error(`删除语音记录失败: ${error.message}`, error.stack);
+      throw new Error(`删除语音记录失败: ${error.message}`);
+    }
+  }
+
+  // =================== 私有方法 ===================
+
+  /**
+   * 查找现有的语音记录
+   */
+  private async findExistingSpeech(cacheKey: string) {
+    return await this.prisma.speechRecord.findFirst({
+      where: { cacheKey }
+    });
+  }
+
+  /**
+   * 格式化语音响应
+   */
+  private formatSpeechResponse(speechRecord: any): SpeechResponseDto {
+    return {
+      audioUrl: speechRecord.audioUrl,
+      fileName: speechRecord.fileName,
+      duration: speechRecord.duration,
+      voiceId: speechRecord.voiceId,
+      outputFormat: speechRecord.outputFormat,
+      originalText: speechRecord.originalText,
+      createdAt: speechRecord.createdAt,
+    };
   }
 
   /**

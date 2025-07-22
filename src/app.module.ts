@@ -5,10 +5,10 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import appConfig from './config/app.config';
 import awsConfig from './config/aws.config';
-import { CacheModule } from './modules/cache/cache.module';
 import { DocumentModule } from './modules/document/document.module';
 import { SpeechModule } from './modules/speech/speech.module';
-import { PrismaModule } from './prisma/prisma.module';  // 添加这行
+import { AudioModule } from './modules/audio/audio.module';
+import { PrismaModule } from './prisma/prisma.module';
 
 @Module({
   imports: [
@@ -17,11 +17,10 @@ import { PrismaModule } from './prisma/prisma.module';  // 添加这行
       load: [appConfig, awsConfig],
       envFilePath: '.env',
     }),
-    PrismaModule,     // 添加这行
-    CacheModule,
-    DocumentModule,
-    SpeechModule,
-    // 后面会添加其他模块
+    PrismaModule,      // Prisma数据库模块
+    AudioModule,       // 音频处理模块
+    DocumentModule,    // 文档处理模块
+    SpeechModule,      // 语音合成模块
   ],
   controllers: [AppController],
   providers: [AppService],
