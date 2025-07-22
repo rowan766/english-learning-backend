@@ -8,6 +8,7 @@ import awsConfig from './config/aws.config';
 import { CacheModule } from './modules/cache/cache.module';
 import { DocumentModule } from './modules/document/document.module';
 import { SpeechModule } from './modules/speech/speech.module';
+import { PrismaModule } from './prisma/prisma.module';  // 添加这行
 
 @Module({
   imports: [
@@ -16,9 +17,10 @@ import { SpeechModule } from './modules/speech/speech.module';
       load: [appConfig, awsConfig],
       envFilePath: '.env',
     }),
+    PrismaModule,     // 添加这行
     CacheModule,
     DocumentModule,
-    SpeechModule
+    SpeechModule,
     // 后面会添加其他模块
   ],
   controllers: [AppController],

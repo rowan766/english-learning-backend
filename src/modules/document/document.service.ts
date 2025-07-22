@@ -1,8 +1,8 @@
 // src/modules/document/document.service.ts
 import { Injectable, Logger } from '@nestjs/common';
-import { CacheService } from '../cache/cache.service';
-import { SpeechService } from '../speech/speech.service';
+import { PrismaService } from '../../prisma/prisma.service';
 import { AudioProcessingService } from '../audio/audio-processing.service';
+import { SpeechService } from '../speech/speech.service';
 import { 
   ProcessDocumentDto, 
   DocumentResponseDto, 
@@ -22,34 +22,27 @@ export class DocumentService {
   private readonly logger = new Logger(DocumentService.name);
 
   constructor(
-    private readonly cacheService: CacheService,
+    private readonly prisma: PrismaService,  // 替换 CacheService
     private readonly speechService: SpeechService,
     private readonly audioProcessingService: AudioProcessingService,
   ) {}
 
   /**
-   * 处理文档内容
+   * 处理文档内容并保存到数据库
    */
   async processDocument(processDocumentDto: ProcessDocumentDto): Promise<DocumentResponseDto> {
     const { content, type, title } = processDocumentDto;
     
-    // 生成缓存键
-    const cacheKey = this.generateCacheKey(content, type);
-    
-    // 检查缓存
-    const cached = this.cacheService.get<DocumentResponseDto>(cacheKey);
-    if (cached) {
-      this.logger.log(`从缓存获取文档: ${cacheKey}`);
-      return cached;
-    }
+    this.logger.log(`开始处理文档: ${title}`);
 
-    // 处理文档
-    const processedDocument = await this.parseDocument(content, type, title);
+    // 处理文档内容
+    const parsedDocument = await this.parseDocumentContent(content, type, title);
     
-    // 存入缓存
-    this.cacheService.set(cacheKey, processedDocument);
+    // 保存到数据库
+    const savedDocument = await this.saveDocumentToDatabase(parsedDocument);
     
-    return processedDocument;
+    this.logger.log(`文档处理完成，ID: ${savedDocument.id}`);
+    return this.formatDocumentResponse(savedDocument);
   }
 
   /**
@@ -58,41 +51,128 @@ export class DocumentService {
   async processDocumentWithAudio(
     processDocumentDto: ProcessDocumentWithAudioDto
   ): Promise<DocumentResponseDto> {
-    // 先处理文档
+    // 先处理并保存文档
     const document = await this.processDocument(processDocumentDto);
     
     // 如果需要生成语音
     if (processDocumentDto.generateAudio !== false) {
       this.logger.log(`开始为文档生成语音，段落数: ${document.paragraphs.length}`);
       
-      // 为每个段落生成语音
-      for (const paragraph of document.paragraphs) {
-        try {
-          const speechResponse = await this.speechService.generateSpeech({
-            text: paragraph.content,
-            voiceId: processDocumentDto.voiceId as any,
-            outputFormat: processDocumentDto.outputFormat as any,
-            fileName: `${document.id}_paragraph_${paragraph.order}`,
-          });
-
-          // 更新段落的语音信息
-          paragraph.audioUrl = speechResponse.audioUrl;
-          paragraph.audioFileName = speechResponse.fileName;
-          paragraph.audioDuration = speechResponse.duration;
-
-          this.logger.log(`段落 ${paragraph.order} 语音生成成功`);
-        } catch (error) {
-          this.logger.error(`段落 ${paragraph.order} 语音生成失败: ${error.message}`);
-          // 继续处理其他段落，不中断整个流程
-        }
-      }
+      await this.generateAudioForParagraphs(document.id, document.paragraphs, processDocumentDto);
       
-      // 更新缓存
-      const cacheKey = this.generateCacheKey(processDocumentDto.content, processDocumentDto.type);
-      this.cacheService.set(cacheKey, document);
+      // 重新获取更新后的文档
+      return await this.getDocumentById(document.id);
     }
     
     return document;
+  }
+
+  /**
+   * 文档与音频智能匹配
+   */
+  async matchDocumentWithAudio(
+    documentBuffer: Buffer,
+    audioBuffer: Buffer,
+    originalDocumentName: string,
+    originalAudioName: string,
+    matchOptions: DocumentAudioMatchDto
+  ): Promise<DocumentAudioMatchResponseDto> {
+    this.logger.log(`开始文档音频匹配: ${originalDocumentName} + ${originalAudioName}`);
+    
+    try {
+      // 1. 保存音频文件并获取信息
+      const { filePath: audioFilePath, audioUrl, audioInfo } = 
+        await this.audioProcessingService.saveAudioFile(audioBuffer, originalAudioName);
+      
+      // 2. 解析文档内容
+      const documentType = this.getDocumentTypeFromFileName(originalDocumentName);
+      const documentContent = await this.extractTextFromBuffer(documentBuffer, documentType);
+      
+      // 3. 处理文档，获取段落
+      const parsedDocument = await this.parseDocumentContent(documentContent, documentType, matchOptions.title);
+      
+      // 4. 根据策略分割音频
+      const audioSegments = await this.segmentAudio(
+        audioFilePath,
+        matchOptions.segmentStrategy || 'silence',
+        matchOptions
+      );
+      
+      // 5. 保存文档到数据库
+      const savedDocument = await this.saveDocumentToDatabase({
+        ...parsedDocument,
+        originalAudioUrl: audioUrl,
+        originalAudioDuration: audioInfo.duration,
+        matchStrategy: matchOptions.segmentStrategy || 'silence',
+      });
+
+      // 6. 智能匹配段落和音频片段
+      const matchedResults = await this.matchParagraphsWithAudioSegments(
+        savedDocument.paragraphs,
+        audioSegments,
+        audioFilePath,
+        savedDocument.id
+      );
+      
+      // 7. 构建响应
+      const response: DocumentAudioMatchResponseDto = {
+        ...this.formatDocumentResponse(savedDocument),
+        originalAudioUrl: audioUrl,
+        originalAudioDuration: audioInfo.duration,
+        audioSegments: matchedResults.audioSegments,
+        matchStrategy: matchOptions.segmentStrategy || 'silence',
+        needsManualAdjustment: matchedResults.needsManualAdjustment,
+      };
+      
+      this.logger.log(`文档音频匹配完成: ${response.paragraphs.length}个段落, ${response.audioSegments.length}个音频片段`);
+      return response;
+      
+    } catch (error) {
+      this.logger.error(`文档音频匹配失败: ${error.message}`, error.stack);
+      throw new Error(`文档音频匹配失败: ${error.message}`);
+    }
+  }
+
+  /**
+   * 根据ID获取文档
+   */
+  async getDocumentById(id: string): Promise<DocumentResponseDto> {
+    const document = await this.prisma.document.findUnique({
+      where: { id },
+      include: {
+        paragraphs: {
+          orderBy: { orderNum: 'asc' }
+        },
+        audioSegments: {
+          orderBy: { orderNum: 'asc' }
+        }
+      }
+    });
+
+    if (!document) {
+      throw new Error(`文档未找到: ${id}`);
+    }
+
+    return this.formatDocumentResponse(document);
+  }
+
+  /**
+   * 获取所有文档列表
+   */
+  async getDocumentList(): Promise<DocumentResponseDto[]> {
+    const documents = await this.prisma.document.findMany({
+      include: {
+        paragraphs: {
+          orderBy: { orderNum: 'asc' }
+        },
+        audioSegments: {
+          orderBy: { orderNum: 'asc' }
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    return documents.map(doc => this.formatDocumentResponse(doc));
   }
 
   /**
@@ -120,23 +200,64 @@ export class DocumentService {
   }
 
   /**
+   * 检查是否为文档文件
+   */
+  isDocumentFile(file: Express.Multer.File): boolean {
+    const documentMimeTypes = [
+      'text/plain',
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    ];
+    
+    if (documentMimeTypes.includes(file.mimetype)) {
+      return true;
+    }
+    
+    const extension = file.originalname.toLowerCase().split('.').pop();
+    return ['txt', 'pdf', 'doc', 'docx'].includes(extension || '');
+  }
+
+  /**
+   * 检查是否为音频文件
+   */
+  isAudioFile(file: Express.Multer.File): boolean {
+    const audioMimeTypes = [
+      'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/wave',
+      'audio/x-wav', 'audio/mp4', 'audio/m4a', 'audio/aac',
+      'audio/ogg', 'audio/webm'
+    ];
+    
+    if (audioMimeTypes.includes(file.mimetype)) {
+      return true;
+    }
+    
+    const extension = file.originalname.toLowerCase().split('.').pop();
+    return ['mp3', 'wav', 'wave', 'm4a', 'aac', 'ogg', 'webm'].includes(extension || '');
+  }
+
+  /**
+   * 获取不带扩展名的文件名
+   */
+  getFileNameWithoutExtension(filename: string): string {
+    return filename.replace(/\.[^/.]+$/, '');
+  }
+
+  // =================== 私有方法 ===================
+
+  /**
    * 解析文档内容
    */
-  private async parseDocument(
+  private async parseDocumentContent(
     content: string, 
     type: DocumentType, 
     title?: string
-  ): Promise<DocumentResponseDto> {
-    // 清理和规范化文本
+  ) {
     const cleanContent = this.cleanText(content);
-    
-    // 分段处理
     const paragraphs = this.splitIntoParagraphs(cleanContent);
-    
-    // 统计信息
     const wordCount = this.countWords(cleanContent);
     const sentenceCount = paragraphs.reduce((count, p) => count + p.sentences.length, 0);
-    
+
     return {
       id: uuidv4(),
       title: title || `Document_${Date.now()}`,
@@ -146,136 +267,74 @@ export class DocumentService {
       sentenceCount,
       paragraphCount: paragraphs.length,
       paragraphs,
-      createdAt: new Date(),
     };
   }
 
   /**
-   * 清理文本内容
+   * 保存文档到数据库
    */
-  private cleanText(text: string): string {
-    return text
-      .replace(/\r\n/g, '\n')    // 统一换行符
-      .replace(/\n{3,}/g, '\n\n') // 合并多个连续换行为双换行
-      .replace(/[ \t]+/g, ' ')   // 合并多个空格和制表符
-      .trim();                   // 去除首尾空格
-  }
-
-  /**
-   * 将文本分割成段落
-   */
-  private splitIntoParagraphs(text: string): ParagraphDto[] {
-    // 按双换行分割段落
-    const paragraphTexts = text
-      .split(/\n\s*\n/)
-      .map(p => p.trim())
-      .filter(p => p.length > 0);
-
-    return paragraphTexts.map((paragraphText, index) => {
-      const sentences = this.splitIntoSentences(paragraphText);
-      const wordCount = this.countWords(paragraphText);
-
-      return {
-        id: uuidv4(),
-        content: paragraphText,
-        order: index + 1,
-        wordCount,
-        sentences,
-      };
+  private async saveDocumentToDatabase(documentData: any) {
+    return await this.prisma.document.create({
+      data: {
+        id: documentData.id,
+        title: documentData.title,
+        content: documentData.content,
+        type: documentData.type,
+        wordCount: documentData.wordCount,
+        sentenceCount: documentData.sentenceCount,
+        paragraphCount: documentData.paragraphCount,
+        originalAudioUrl: documentData.originalAudioUrl || null,
+        originalAudioDuration: documentData.originalAudioDuration || null,
+        matchStrategy: documentData.matchStrategy || null,
+        paragraphs: {
+          create: documentData.paragraphs.map((paragraph: any, index: number) => ({
+            id: paragraph.id,
+            content: paragraph.content,
+            orderNum: index + 1,
+            wordCount: paragraph.wordCount,
+            sentences: paragraph.sentences,
+          }))
+        }
+      },
+      include: {
+        paragraphs: {
+          orderBy: { orderNum: 'asc' }
+        }
+      }
     });
   }
 
   /**
-   * 将文本分割成句子
+   * 为段落生成音频
    */
-  private splitIntoSentences(text: string): string[] {
-    // 改进的句子分割，处理缩写等情况
-    return text
-      .split(/(?<=[.!?])\s+(?=[A-Z])/)  // 在句号、感叹号、问号后面且后跟大写字母的地方分割
-      .map(sentence => sentence.trim())
-      .filter(sentence => sentence.length > 0);
-  }
+  private async generateAudioForParagraphs(
+    documentId: string,
+    paragraphs: ParagraphDto[],
+    options: ProcessDocumentWithAudioDto
+  ): Promise<void> {
+    for (const paragraph of paragraphs) {
+      try {
+        const speechResponse = await this.speechService.generateSpeech({
+          text: paragraph.content,
+          voiceId: options.voiceId as any,
+          outputFormat: options.outputFormat as any,
+          fileName: `${documentId}_paragraph_${paragraph.order}`,
+        });
 
-  /**
-   * 统计单词数
-   */
-  private countWords(text: string): number {
-    return text
-      .split(/\s+/)
-      .filter(word => word.length > 0 && /[a-zA-Z]/.test(word))
-      .length;
-  }
+        // 更新段落的音频信息
+        await this.prisma.paragraph.update({
+          where: { id: paragraph.id },
+          data: {
+            audioUrl: speechResponse.audioUrl,
+            audioFileName: speechResponse.fileName,
+            audioDuration: speechResponse.duration,
+          }
+        });
 
-  /**
-   * 生成缓存键
-   */
-  private generateCacheKey(content: string, type: DocumentType): string {
-    const hash = this.simpleHash(content);
-    return `doc_${type}_${hash}`;
-  }
-
-  /**
-   * 文档与音频智能匹配
-   */
-  async matchDocumentWithAudio(
-    documentBuffer: Buffer,
-    audioBuffer: Buffer,
-    originalDocumentName: string,
-    originalAudioName: string,
-    matchOptions: DocumentAudioMatchDto
-  ): Promise<DocumentAudioMatchResponseDto> {
-    this.logger.log(`开始文档音频匹配: ${originalDocumentName} + ${originalAudioName}`);
-    
-    try {
-      // 1. 保存音频文件并获取信息
-      const { filePath: audioFilePath, audioUrl, audioInfo } = 
-        await this.audioProcessingService.saveAudioFile(audioBuffer, originalAudioName);
-      
-      // 2. 解析文档内容
-      const documentType = this.getDocumentTypeFromFileName(originalDocumentName);
-      const documentContent = await this.extractTextFromBuffer(documentBuffer, documentType);
-      
-      // 3. 处理文档，获取段落
-      const document = await this.parseDocument(documentContent, documentType, matchOptions.title);
-      
-      // 4. 根据策略分割音频
-      const audioSegments = await this.segmentAudio(
-        audioFilePath,
-        matchOptions.segmentStrategy || 'silence',
-        matchOptions
-      );
-      
-      // 5. 智能匹配段落和音频片段
-      const matchedResults = await this.matchParagraphsWithAudioSegments(
-        document.paragraphs,
-        audioSegments,
-        audioFilePath,
-        document.id
-      );
-      
-      // 6. 构建响应
-      const response: DocumentAudioMatchResponseDto = {
-        ...document,
-        originalAudioUrl: audioUrl,
-        originalAudioDuration: audioInfo.duration,
-        audioSegments: matchedResults.audioSegments,
-        matchStrategy: matchOptions.segmentStrategy || 'silence',
-        needsManualAdjustment: matchedResults.needsManualAdjustment,
-      };
-      
-      // 7. 更新段落信息
-      response.paragraphs = matchedResults.paragraphs;
-      
-      // 8. 缓存结果
-      const cacheKey = this.generateCacheKey(`${documentContent}_${originalAudioName}`, documentType);
-      this.cacheService.set(cacheKey, response);
-      
-      this.logger.log(`文档音频匹配完成: ${response.paragraphs.length}个段落, ${response.audioSegments.length}个音频片段`);
-      return response;
-      
-    } catch (error) {
-      this.logger.error(`文档音频匹配失败: ${error.message}`, error.stack);
-      throw new Error(`文档音频匹配失败: ${error.message}`);
+        this.logger.log(`段落 ${paragraph.order} 语音生成成功`);
+      } catch (error) {
+        this.logger.error(`段落 ${paragraph.order} 语音生成失败: ${error.message}`);
+      }
     }
   }
 
@@ -302,7 +361,6 @@ export class DocumentService {
         );
       
       case 'manual':
-        // 手动分段模式，返回整个音频作为一个段落
         const audioInfo = await this.audioProcessingService.getAudioInfo(audioFilePath);
         return [{
           startTime: 0,
@@ -319,7 +377,7 @@ export class DocumentService {
    * 智能匹配段落和音频片段
    */
   private async matchParagraphsWithAudioSegments(
-    paragraphs: ParagraphDto[],
+    paragraphs: any[],
     audioSegments: any[],
     audioFilePath: string,
     documentId: string
@@ -328,33 +386,33 @@ export class DocumentService {
     audioSegments: AudioSegmentDto[];
     needsManualAdjustment: boolean;
   }> {
-    const matchedParagraphs = [...paragraphs];
     const processedAudioSegments: AudioSegmentDto[] = [];
-    
-    // 智能匹配策略：
-    // 1. 如果段落数量和音频片段数量相近（差距在20%以内），直接一对一匹配
-    // 2. 如果音频片段多于段落，合并相邻片段
-    // 3. 如果段落多于音频片段，分割音频片段
     
     const paragraphCount = paragraphs.length;
     const segmentCount = audioSegments.length;
     const ratio = Math.abs(paragraphCount - segmentCount) / Math.max(paragraphCount, segmentCount);
     
-    let needsManualAdjustment = ratio > 0.3; // 如果差距超过30%，建议手动调整
+    let needsManualAdjustment = ratio > 0.3;
     
     if (ratio <= 0.2) {
-      // 一对一匹配（差距在20%以内）
-      await this.oneToOneMatch(matchedParagraphs, audioSegments, audioFilePath, documentId, processedAudioSegments);
+      await this.oneToOneMatch(paragraphs, audioSegments, audioFilePath, documentId, processedAudioSegments);
     } else if (segmentCount > paragraphCount) {
-      // 音频片段多，合并策略
-      await this.mergeAudioSegments(matchedParagraphs, audioSegments, audioFilePath, documentId, processedAudioSegments);
+      await this.mergeAudioSegments(paragraphs, audioSegments, audioFilePath, documentId, processedAudioSegments);
     } else {
-      // 段落多，分割策略
-      await this.splitAudioSegments(matchedParagraphs, audioSegments, audioFilePath, documentId, processedAudioSegments);
+      await this.splitAudioSegments(paragraphs, audioSegments, audioFilePath, documentId, processedAudioSegments);
     }
     
     return {
-      paragraphs: matchedParagraphs,
+      paragraphs: paragraphs.map(p => ({
+        id: p.id,
+        content: p.content,
+        order: p.orderNum,
+        wordCount: p.wordCount,
+        sentences: p.sentences,
+        audioUrl: p.audioUrl,
+        audioFileName: p.audioFileName,
+        audioDuration: p.audioDuration,
+      })),
       audioSegments: processedAudioSegments,
       needsManualAdjustment,
     };
@@ -364,7 +422,7 @@ export class DocumentService {
    * 一对一匹配
    */
   private async oneToOneMatch(
-    paragraphs: ParagraphDto[],
+    paragraphs: any[],
     audioSegments: any[],
     audioFilePath: string,
     documentId: string,
@@ -372,7 +430,6 @@ export class DocumentService {
   ): Promise<void> {
     const minLength = Math.min(paragraphs.length, audioSegments.length);
     
-    // 生成音频片段文件
     const segmentResults = await this.audioProcessingService.generateSegmentAudios(
       audioFilePath,
       audioSegments.slice(0, minLength),
@@ -384,12 +441,15 @@ export class DocumentService {
       const segmentResult = segmentResults[i];
       
       if (segmentResult) {
-        // 更新段落信息
-        paragraph.audioUrl = segmentResult.audioUrl;
-        paragraph.audioFileName = segmentResult.segmentId;
-        paragraph.audioDuration = segmentResult.segment.duration;
+        await this.prisma.paragraph.update({
+          where: { id: paragraph.id },
+          data: {
+            audioUrl: segmentResult.audioUrl,
+            audioFileName: segmentResult.segmentId,
+            audioDuration: segmentResult.segment.duration,
+          }
+        });
         
-        // 添加到音频片段列表
         processedAudioSegments.push({
           id: segmentResult.segmentId,
           startTime: segmentResult.segment.startTime,
@@ -408,7 +468,7 @@ export class DocumentService {
    * 合并音频片段策略
    */
   private async mergeAudioSegments(
-    paragraphs: ParagraphDto[],
+    paragraphs: any[],
     audioSegments: any[],
     audioFilePath: string,
     documentId: string,
@@ -422,7 +482,6 @@ export class DocumentService {
       const segmentsToMerge = audioSegments.slice(startIndex, endIndex);
       
       if (segmentsToMerge.length > 0) {
-        // 合并片段
         const mergedSegment = {
           startTime: segmentsToMerge[0].startTime,
           endTime: segmentsToMerge[segmentsToMerge.length - 1].endTime,
@@ -440,12 +499,15 @@ export class DocumentService {
             outputFileName
           );
           
-          // 更新段落信息
-          paragraphs[i].audioUrl = audioUrl;
-          paragraphs[i].audioFileName = segmentId;
-          paragraphs[i].audioDuration = mergedSegment.duration;
+          await this.prisma.paragraph.update({
+            where: { id: paragraphs[i].id },
+            data: {
+              audioUrl: audioUrl,
+              audioFileName: segmentId,
+              audioDuration: mergedSegment.duration,
+            }
+          });
           
-          // 添加到音频片段列表
           processedAudioSegments.push({
             id: segmentId,
             startTime: mergedSegment.startTime,
@@ -465,7 +527,7 @@ export class DocumentService {
    * 分割音频片段策略
    */
   private async splitAudioSegments(
-    paragraphs: ParagraphDto[],
+    paragraphs: any[],
     audioSegments: any[],
     audioFilePath: string,
     documentId: string,
@@ -479,7 +541,6 @@ export class DocumentService {
       const endParagraphIndex = Math.min(startParagraphIndex + paragraphsPerSegment, paragraphs.length);
       const paragraphsForThisSegment = paragraphs.slice(startParagraphIndex, endParagraphIndex);
       
-      // 均匀分割这个音频片段
       const subSegmentDuration = segment.duration / paragraphsForThisSegment.length;
       
       for (let j = 0; j < paragraphsForThisSegment.length; j++) {
@@ -499,12 +560,15 @@ export class DocumentService {
             outputFileName
           );
           
-          // 更新段落信息
-          paragraph.audioUrl = audioUrl;
-          paragraph.audioFileName = segmentId;
-          paragraph.audioDuration = subSegmentDur;
+          await this.prisma.paragraph.update({
+            where: { id: paragraph.id },
+            data: {
+              audioUrl: audioUrl,
+              audioFileName: segmentId,
+              audioDuration: subSegmentDur,
+            }
+          });
           
-          // 添加到音频片段列表
           processedAudioSegments.push({
             id: segmentId,
             startTime: subSegmentStart,
@@ -518,6 +582,86 @@ export class DocumentService {
         }
       }
     }
+  }
+
+  /**
+   * 格式化文档响应
+   */
+  private formatDocumentResponse(document: any): DocumentResponseDto {
+    return {
+      id: document.id,
+      title: document.title,
+      content: document.content,
+      type: document.type,
+      wordCount: document.wordCount,
+      sentenceCount: document.sentenceCount,
+      paragraphCount: document.paragraphCount,
+      paragraphs: document.paragraphs.map((p: any) => ({
+        id: p.id,
+        content: p.content,
+        order: p.orderNum,
+        wordCount: p.wordCount,
+        sentences: p.sentences,
+        audioUrl: p.audioUrl,
+        audioFileName: p.audioFileName,
+        audioDuration: p.audioDuration,
+      })),
+      createdAt: document.createdAt,
+    };
+  }
+
+  /**
+   * 清理文本内容
+   */
+  private cleanText(text: string): string {
+    return text
+      .replace(/\r\n/g, '\n')    
+      .replace(/\n{3,}/g, '\n\n') 
+      .replace(/[ \t]+/g, ' ')   
+      .trim();                   
+  }
+
+  /**
+   * 将文本分割成段落
+   */
+  private splitIntoParagraphs(text: string): ParagraphDto[] {
+    const paragraphTexts = text
+      .split(/\n\s*\n/)
+      .map(p => p.trim())
+      .filter(p => p.length > 0);
+
+    return paragraphTexts.map((paragraphText, index) => {
+      const sentences = this.splitIntoSentences(paragraphText);
+      const wordCount = this.countWords(paragraphText);
+
+      return {
+        id: uuidv4(),
+        content: paragraphText,
+        order: index + 1,
+        wordCount,
+        sentences,
+      };
+    });
+  }
+
+  /**
+   * 将文本分割成句子
+   */
+  private splitIntoSentences(text: string): string[] {
+    return text
+      .split(/(?<=[.!?])\s+(?=[A-Z])/)  
+      .map(sentence => sentence.trim())
+      .filter(sentence => sentence.length > 0);
+  }
+
+  /**
+   * 统计单词数
+   */
+  private countWords(text: string): number {
+    return text
+      .split(/\s+/)
+      .filter(word => word.length > 0 && /[a-zA-Z]/.test(word))
+      .length;
   }
 
   /**
@@ -542,28 +686,15 @@ export class DocumentService {
    * 从Buffer中提取文本内容
    */
   private async extractTextFromBuffer(buffer: Buffer, type: DocumentType): Promise<string> {
-  switch (type) {
-    case DocumentType.TEXT:
-      return buffer.toString('utf-8');
-    case DocumentType.PDF:
-      return await this.extractPdfText(buffer);
-    case DocumentType.WORD:
-      return await this.extractWordText(buffer);
-    default:
-      throw new Error(`不支持的文档类型: ${type}`);
-  }
-  }
-
-  /**
-   * 简单哈希函数
-   */
-  private simpleHash(str: string): string {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-      const char = str.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash;
+    switch (type) {
+      case DocumentType.TEXT:
+        return buffer.toString('utf-8');
+      case DocumentType.PDF:
+        return await this.extractPdfText(buffer);
+      case DocumentType.WORD:
+        return await this.extractWordText(buffer);
+      default:
+        throw new Error(`不支持的文档类型: ${type}`);
     }
-    return Math.abs(hash).toString(36);
   }
 }

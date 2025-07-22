@@ -1,0 +1,101 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// 文档表
+model Document {
+  id                      String    @id @default(uuid())
+  title                   String
+  content                 String    @db.Text
+  type                    DocumentType
+  wordCount               Int       @default(0) @map("word_count")
+  sentenceCount           Int       @default(0) @map("sentence_count") 
+  paragraphCount          Int       @default(0) @map("paragraph_count")
+  originalAudioUrl        String?   @map("original_audio_url")
+  originalAudioDuration   Float?    @map("original_audio_duration")
+  matchStrategy           String?   @map("match_strategy")
+  needsManualAdjustment   Boolean   @default(false) @map("needs_manual_adjustment")
+  createdAt               DateTime  @default(now()) @map("created_at")
+  updatedAt               DateTime  @updatedAt @map("updated_at")
+  
+  // 关联关系
+  paragraphs              Paragraph[]
+  audioSegments           AudioSegment[]
+  userProgress            UserProgress[]
+  
+  @@map("documents")
+}
+
+// 段落表
+model Paragraph {
+  id                String    @id @default(uuid())
+  documentId        String    @map("document_id")
+  content           String    @db.Text
+  orderNum          Int       @map("order_num")
+  wordCount         Int       @default(0) @map("word_count")
+  sentences         Json      // 存储句子数组
+  audioUrl          String?   @map("audio_url")
+  audioFileName     String?   @map("audio_file_name")
+  audioDuration     Float?    @map("audio_duration")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  
+  // 关联关系
+  document          Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  
+  @@map("paragraphs")
+  @@index([documentId, orderNum])
+}
+
+// 音频片段表
+model AudioSegment {
+  id                String    @id @default(uuid())
+  documentId        String    @map("document_id")
+  paragraphId       String?   @map("paragraph_id")
+  startTime         Float     @map("start_time")
+  endTime           Float     @map("end_time")
+  duration          Float
+  segmentAudioUrl   String    @map("segment_audio_url")
+  orderNum          Int       @map("order_num")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  
+  // 关联关系
+  document          Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  
+  @@map("audio_segments")
+  @@index([documentId, orderNum])
+}
+
+// 用户学习进度表（可选，为未来扩展）
+model UserProgress {
+  id              String    @id @default(uuid())
+  userId          String?   @map("user_id") // 未来用户系统
+  documentId      String    @map("document_id")
+  paragraphId     String?   @map("paragraph_id")
+  currentPosition Float     @default(0) @map("current_position")
+  totalStudyTime  Int       @default(0) @map("total_study_time") // 秒
+  lastStudiedAt   DateTime  @default(now()) @map("last_studied_at")
+  studyCount      Int       @default(0) @map("study_count")
+  isFavorite      Boolean   @default(false) @map("is_favorite")
+  notes           String?   @db.Text
+  
+  // 关联关系
+  document        Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  
+  @@map("user_progress")
+  @@index([userId, documentId])
+}
+
+// 枚举类型
+enum DocumentType {
+  TEXT
+  PDF
+  WORD
+}

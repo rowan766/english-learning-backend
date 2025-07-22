@@ -102,7 +102,7 @@ export class SpeechService {
       };
 
       // 存入缓存
-      this.cacheService.set(cacheKey, result);
+      // this.cacheService.set(cacheKey, result);
 
       this.logger.log(`语音生成成功: ${audioFileName}`);
       return result;
