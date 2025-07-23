@@ -24,9 +24,7 @@ import {
   ProcessDocumentDto, 
   DocumentResponseDto, 
   DocumentType,
-  ProcessDocumentWithAudioDto,
-  DocumentAudioMatchDto,
-  DocumentAudioMatchResponseDto
+  ProcessDocumentWithAudioDto
 } from './dto/process-document.dto';
 
 @ApiTags('document')
@@ -66,7 +64,6 @@ export class DocumentController {
     @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
     @Query('limit', new DefaultValuePipe(10), ParseIntPipe) limit: number
   ): Promise<DocumentResponseDto[]> {
-    // 限制每页最大数量
     const take = Math.min(limit, 50);
     const skip = (page - 1) * take;
     
@@ -116,14 +113,7 @@ export class DocumentController {
   })
   @ApiResponse({ 
     status: 200, 
-    description: '删除成功',
-    schema: {
-      type: 'object',
-      properties: {
-        success: { type: 'boolean', example: true },
-        message: { type: 'string', example: '文档删除成功' }
-      }
-    }
+    description: '删除成功'
   })
   @ApiResponse({ 
     status: 404, 
@@ -150,9 +140,19 @@ export class DocumentController {
    */
   @Post('process-text')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: '处理文本内容', description: '解析文本内容，返回处理后的文档信息' })
-  @ApiResponse({ status: 200, description: '处理成功', type: DocumentResponseDto })
-  @ApiResponse({ status: 400, description: '请求参数错误' })
+  @ApiOperation({ 
+    summary: '处理文本内容', 
+    description: '解析文本内容，返回处理后的文档信息' 
+  })
+  @ApiResponse({ 
+    status: 200, 
+    description: '处理成功', 
+    type: DocumentResponseDto 
+  })
+  @ApiResponse({ 
+    status: 400, 
+    description: '请求参数错误' 
+  })
   async processText(@Body() processDocumentDto: ProcessDocumentDto): Promise<DocumentResponseDto> {
     return await this.documentService.processDocument(processDocumentDto);
   }
@@ -166,8 +166,15 @@ export class DocumentController {
     summary: '处理文本内容并生成语音', 
     description: '解析文本内容并为每个段落生成语音文件' 
   })
-  @ApiResponse({ status: 200, description: '处理成功', type: DocumentResponseDto })
-  @ApiResponse({ status: 400, description: '请求参数错误' })
+  @ApiResponse({ 
+    status: 200, 
+    description: '处理成功', 
+    type: DocumentResponseDto 
+  })
+  @ApiResponse({ 
+    status: 400, 
+    description: '请求参数错误' 
+  })
   async processTextWithAudio(
     @Body() processDocumentDto: ProcessDocumentWithAudioDto
   ): Promise<DocumentResponseDto> {
@@ -203,8 +210,15 @@ export class DocumentController {
       required: ['file']
     }
   })
-  @ApiResponse({ status: 200, description: '上传成功', type: DocumentResponseDto })
-  @ApiResponse({ status: 400, description: '文件格式不支持或上传失败' })
+  @ApiResponse({ 
+    status: 200, 
+    description: '上传成功', 
+    type: DocumentResponseDto 
+  })
+  @ApiResponse({ 
+    status: 400, 
+    description: '文件格式不支持或上传失败' 
+  })
   async uploadFile(
     @UploadedFile() file: Express.Multer.File,
     @Body('title') title?: string
@@ -213,13 +227,11 @@ export class DocumentController {
       throw new BadRequestException('请提供文件');
     }
 
-    // 检查文件类型
     const documentType = this.getDocumentType(file.mimetype, file.originalname);
     if (!documentType) {
       throw new BadRequestException('不支持的文件类型，请上传 .txt、.pdf 或 .docx 文件');
     }
 
-    // 提取文本内容
     const content = await this.extractTextFromFile(file, documentType);
 
     const processDocumentDto: ProcessDocumentDto = {
@@ -275,8 +287,15 @@ export class DocumentController {
       required: ['file']
     }
   })
-  @ApiResponse({ status: 200, description: '上传成功', type: DocumentResponseDto })
-  @ApiResponse({ status: 400, description: '文件格式不支持或上传失败' })
+  @ApiResponse({ 
+    status: 200, 
+    description: '上传成功', 
+    type: DocumentResponseDto 
+  })
+  @ApiResponse({ 
+    status: 400, 
+    description: '文件格式不支持或上传失败' 
+  })
   async uploadFileWithAudio(
     @UploadedFile() file: Express.Multer.File,
     @Body('title') title?: string,
@@ -288,20 +307,18 @@ export class DocumentController {
       throw new BadRequestException('请提供文件');
     }
 
-    // 检查文件类型
     const documentType = this.getDocumentType(file.mimetype, file.originalname);
     if (!documentType) {
       throw new BadRequestException('不支持的文件类型，请上传 .txt、.pdf 或 .docx 文件');
     }
 
-    // 提取文本内容
     const content = await this.extractTextFromFile(file, documentType);
 
     const processDocumentDto: ProcessDocumentWithAudioDto = {
       content,
       type: documentType,
       title: title || this.getFileNameWithoutExtension(file.originalname),
-      generateAudio: generateAudio !== false, // 默认为true
+      generateAudio: generateAudio !== false,
       voiceId: voiceId || 'Joanna',
       outputFormat: outputFormat || 'mp3',
     };
@@ -309,15 +326,15 @@ export class DocumentController {
     return await this.documentService.processDocumentWithAudio(processDocumentDto);
   }
 
-  /**
-   * 上传文档和音频进行智能匹配
+/**
+   * 智能文档音频匹配（完整版）
    */
-  @Post('match-with-audio')
+  @Post('smart-audio-match')
   @HttpCode(HttpStatus.OK)
-  @UseInterceptors(FilesInterceptor('files', 2)) // 接受2个文件
+  @UseInterceptors(FilesInterceptor('files', 2))
   @ApiOperation({ 
-    summary: '文档音频智能匹配', 
-    description: '同时上传文档和音频文件，自动建立段落与音频片段的对应关系' 
+    summary: '智能文档音频匹配', 
+    description: '上传文档和音频，自动进行段落匹配' 
   })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
@@ -331,55 +348,36 @@ export class DocumentController {
             type: 'string',
             format: 'binary'
           },
-          description: '文档文件（.txt/.pdf/.docx）和音频文件（.mp3/.wav/.m4a等）'
+          description: '文档文件和音频文件（共2个文件）'
         },
         title: {
           type: 'string',
           description: '文档标题'
-        },
-        segmentStrategy: {
-          type: 'string',
-          enum: ['silence', 'time', 'manual'],
-          description: '音频分段策略',
-          default: 'silence'
-        },
-        segmentDuration: {
-          type: 'number',
-          description: '时间分段时长（秒），strategy为time时使用',
-          default: 30
-        },
-        silenceThreshold: {
-          type: 'number',
-          description: '静音检测阈值（0-1），strategy为silence时使用',
-          default: 0.01
-        },
-        minSilenceDuration: {
-          type: 'number',
-          description: '最小静音时长（秒），strategy为silence时使用',
-          default: 1.0
         }
       },
       required: ['files']
     }
   })
-  @ApiResponse({ status: 200, description: '匹配成功', type: DocumentAudioMatchResponseDto })
-  @ApiResponse({ status: 400, description: '文件格式不支持或匹配失败' })
-  async matchDocumentWithAudio(
+  @ApiResponse({ 
+    status: 200, 
+    description: '匹配成功' 
+  })
+  @ApiResponse({ 
+    status: 400, 
+    description: '文件格式不支持或匹配失败' 
+  })
+  async smartAudioMatch(
     @UploadedFiles() files: Express.Multer.File[],
-    @Body('title') title?: string,
-    @Body('segmentStrategy') segmentStrategy?: string,
-    @Body('segmentDuration') segmentDuration?: string,
-    @Body('silenceThreshold') silenceThreshold?: string,
-    @Body('minSilenceDuration') minSilenceDuration?: string
-  ): Promise<DocumentAudioMatchResponseDto> {
+    @Body('title') title?: string
+  ) {
     if (!files || files.length !== 2) {
       throw new BadRequestException('请同时上传文档文件和音频文件（共2个文件）');
     }
 
-    // 分别识别文档文件和音频文件
     let documentFile: Express.Multer.File | null = null;
     let audioFile: Express.Multer.File | null = null;
 
+    // 识别文件类型
     for (const file of files) {
       if (this.isDocumentFile(file)) {
         documentFile = file;
@@ -397,15 +395,13 @@ export class DocumentController {
     }
 
     // 构建匹配选项
-    const matchOptions: DocumentAudioMatchDto = {
+    const matchOptions = {
       title: title || this.getFileNameWithoutExtension(documentFile.originalname),
       documentType: this.getDocumentType(documentFile.mimetype, documentFile.originalname) ?? DocumentType.TEXT,
-      segmentStrategy: (segmentStrategy as any) || 'silence',
-      segmentDuration: segmentDuration ? parseFloat(segmentDuration) : 30,
-      silenceThreshold: silenceThreshold ? parseFloat(silenceThreshold) : 0.01,
-      minSilenceDuration: minSilenceDuration ? parseFloat(minSilenceDuration) : 1.0,
+      segmentStrategy: 'smart',
     };
 
+    // 调用真正的音频匹配功能
     return await this.documentService.matchDocumentWithAudio(
       documentFile.buffer,
       audioFile.buffer,
@@ -421,7 +417,6 @@ export class DocumentController {
    * 根据MIME类型和文件名确定文档类型
    */
   private getDocumentType(mimetype: string, filename: string): DocumentType | null {
-    // 首先根据MIME类型判断
     switch (mimetype) {
       case 'text/plain':
         return DocumentType.TEXT;
@@ -432,7 +427,6 @@ export class DocumentController {
         return DocumentType.WORD;
     }
 
-    // 如果MIME类型无法识别，根据文件扩展名判断
     const extension = filename.toLowerCase().split('.').pop();
     switch (extension) {
       case 'txt':

@@ -16,19 +16,20 @@ export class SpeechService {
 
   constructor(
     private readonly configService: ConfigService,
-    private readonly prisma: PrismaService,  // 使用Prisma替代缓存
+    private readonly prisma: PrismaService,
   ) {
-    const region = this.configService.get<string>('aws.region');
-    const accessKeyId = this.configService.get<string>('aws.accessKeyId');
-    const secretAccessKey = this.configService.get<string>('aws.secretAccessKey');
+    // 更新配置路径以匹配新的配置结构
+    const region = this.configService.get<string>('aws.region') || this.configService.get<string>('AWS_REGION') || 'us-east-2';
+    const accessKeyId = this.configService.get<string>('aws.accessKeyId') || this.configService.get<string>('AWS_ACCESS_KEY_ID');
+    const secretAccessKey = this.configService.get<string>('aws.secretAccessKey') || this.configService.get<string>('AWS_SECRET_ACCESS_KEY');
 
     // AWS Polly配置
     const awsConfig = {
       region,
-      requestTimeout: 120000,     // 2分钟请求超时
-      connectionTimeout: 60000,   // 1分钟连接超时
-      maxAttempts: 5,             // 最大重试次数
-      retryMode: 'adaptive',      // 自适应重试模式
+      requestTimeout: 120000,
+      connectionTimeout: 60000,
+      maxAttempts: 5,
+      retryMode: 'adaptive',
       ...(accessKeyId && secretAccessKey && {
         credentials: {
           accessKeyId,
@@ -44,9 +45,6 @@ export class SpeechService {
     this.ensureAudioDirectoryExists();
   }
 
-  /**
-   * 确保音频目录存在
-   */
   private ensureAudioDirectoryExists(): void {
     if (!fs.existsSync(this.audioDir)) {
       fs.mkdirSync(this.audioDir, { recursive: true });
@@ -54,26 +52,21 @@ export class SpeechService {
     }
   }
 
-  /**
-   * 生成语音
-   */
   async generateSpeech(generateSpeechDto: GenerateSpeechDto): Promise<SpeechResponseDto> {
     const { text, voiceId = VoiceId.JOANNA, outputFormat = OutputFormat.MP3, fileName } = generateSpeechDto;
 
-    // 生成缓存键用于数据库查找
     const cacheKey = this.generateCacheKey(text, voiceId, outputFormat);
 
-    // 检查数据库中是否已存在相同的语音记录
+    // 使用新的模型名称查询（如果使用了英语学习专用表）
     const existingSpeech = await this.findExistingSpeech(cacheKey);
     if (existingSpeech) {
-      // 检查文件是否还存在
       const filePath = this.getAudioFilePath(existingSpeech.fileName, outputFormat);
       if (fs.existsSync(filePath)) {
         this.logger.log(`从数据库获取语音: ${existingSpeech.fileName}`);
         return this.formatSpeechResponse(existingSpeech);
       } else {
-        // 文件不存在，删除数据库记录
-        await this.prisma.speechRecord.delete({
+        // 使用新的模型名称删除
+        await this.prisma.englishSpeechRecord.delete({
           where: { id: existingSpeech.id }
         });
       }
@@ -82,19 +75,15 @@ export class SpeechService {
     try {
       this.logger.log(`开始生成语音，文本长度: ${text.length}`);
       
-      // 使用AWS Polly生成语音
       const audioData = await this.synthesizeSpeech(text, voiceId, outputFormat);
-
-      // 保存到本地文件
       const audioFileName = fileName || `speech_${uuidv4()}`;
       const audioUrl = await this.saveToLocal(audioData, audioFileName, outputFormat);
 
-      // 估算音频时长 (粗略计算：约每分钟150个单词)
       const wordCount = text.split(' ').length;
       const estimatedDuration = Math.round((wordCount / 150) * 60);
 
-      // 保存记录到数据库
-      const speechRecord = await this.prisma.speechRecord.create({
+      // 使用新的模型名称创建记录
+      const speechRecord = await this.prisma.englishSpeechRecord.create({
         data: {
           id: uuidv4(),
           cacheKey,
@@ -113,7 +102,6 @@ export class SpeechService {
     } catch (error) {
       this.logger.error(`语音生成失败: ${error.message}`, error.stack);
       
-      // 如果是网络超时错误，提供更友好的错误信息
       if (error.message.includes('ETIMEDOUT') || error.message.includes('timeout')) {
         throw new Error('网络连接超时，请稍后重试或检查网络连接');
       }
@@ -122,11 +110,8 @@ export class SpeechService {
     }
   }
 
-  /**
-   * 根据ID获取语音记录
-   */
   async getSpeechById(id: string): Promise<SpeechResponseDto> {
-    const speechRecord = await this.prisma.speechRecord.findUnique({
+    const speechRecord = await this.prisma.englishSpeechRecord.findUnique({
       where: { id }
     });
 
@@ -137,11 +122,8 @@ export class SpeechService {
     return this.formatSpeechResponse(speechRecord);
   }
 
-  /**
-   * 获取所有语音记录
-   */
   async getAllSpeeches(skip: number = 0, take: number = 20): Promise<SpeechResponseDto[]> {
-    const speechRecords = await this.prisma.speechRecord.findMany({
+    const speechRecords = await this.prisma.englishSpeechRecord.findMany({
       skip,
       take,
       orderBy: { createdAt: 'desc' }
@@ -150,25 +132,20 @@ export class SpeechService {
     return speechRecords.map(record => this.formatSpeechResponse(record));
   }
 
-  /**
-   * 删除语音记录
-   */
   async deleteSpeech(id: string): Promise<boolean> {
     try {
-      const speechRecord = await this.prisma.speechRecord.findUnique({
+      const speechRecord = await this.prisma.englishSpeechRecord.findUnique({
         where: { id }
       });
 
       if (speechRecord) {
-        // 删除本地文件
         const filePath = this.getAudioFilePath(speechRecord.fileName, speechRecord.outputFormat as OutputFormat);
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
           this.logger.log(`删除音频文件: ${filePath}`);
         }
 
-        // 删除数据库记录
-        await this.prisma.speechRecord.delete({
+        await this.prisma.englishSpeechRecord.delete({
           where: { id }
         });
 
@@ -185,18 +162,12 @@ export class SpeechService {
 
   // =================== 私有方法 ===================
 
-  /**
-   * 查找现有的语音记录
-   */
   private async findExistingSpeech(cacheKey: string) {
-    return await this.prisma.speechRecord.findFirst({
+    return await this.prisma.englishSpeechRecord.findFirst({
       where: { cacheKey }
     });
   }
 
-  /**
-   * 格式化语音响应
-   */
   private formatSpeechResponse(speechRecord: any): SpeechResponseDto {
     return {
       audioUrl: speechRecord.audioUrl,
@@ -209,9 +180,7 @@ export class SpeechService {
     };
   }
 
-  /**
-   * 使用AWS Polly合成语音
-   */
+  // 其他私有方法保持不变
   private async synthesizeSpeech(
     text: string,
     voiceId: VoiceId,
@@ -234,21 +203,16 @@ export class SpeechService {
 
     this.logger.log('AWS Polly响应成功，开始处理音频流');
 
-    // 将音频流转换为Uint8Array
     const chunks: any[] = [];
     const audioStream = response.AudioStream as any;
     
-    // 处理不同类型的流
     if (audioStream.transformToByteArray) {
-      // 如果有 transformToByteArray 方法，直接使用
       return await audioStream.transformToByteArray();
     } else {
-      // 否则手动读取流
       for await (const chunk of audioStream) {
         chunks.push(chunk);
       }
       
-      // 合并所有chunks
       const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
       const result = new Uint8Array(totalLength);
       let offset = 0;
@@ -263,9 +227,6 @@ export class SpeechService {
     }
   }
 
-  /**
-   * 保存音频到本地文件
-   */
   private async saveToLocal(
     audioData: Uint8Array,
     fileName: string,
@@ -277,10 +238,7 @@ export class SpeechService {
     this.logger.log(`开始保存到本地: ${filePath}，文件大小: ${audioData.length} 字节`);
     
     try {
-      // 写入文件
       fs.writeFileSync(filePath, audioData);
-      
-      // 返回可访问的URL（相对于静态文件服务的路径）
       const audioUrl = `/audio/${fullFileName}`;
       
       this.logger.log(`本地保存成功: ${audioUrl}`);
@@ -292,24 +250,15 @@ export class SpeechService {
     }
   }
 
-  /**
-   * 获取音频文件完整路径
-   */
   private getAudioFilePath(fileName: string, outputFormat: OutputFormat): string {
     return path.join(this.audioDir, `${fileName}.${outputFormat}`);
   }
 
-  /**
-   * 生成缓存键
-   */
   private generateCacheKey(text: string, voiceId: VoiceId, outputFormat: OutputFormat): string {
     const hash = this.simpleHash(text);
     return `speech_${voiceId}_${outputFormat}_${hash}`;
   }
 
-  /**
-   * 简单哈希函数
-   */
   private simpleHash(str: string): string {
     let hash = 0;
     for (let i = 0; i < str.length; i++) {

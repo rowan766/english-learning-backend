@@ -70,76 +70,10 @@ export class DocumentService {
   }
 
   /**
-   * 文档与音频智能匹配
-   */
-  async matchDocumentWithAudio(
-    documentBuffer: Buffer,
-    audioBuffer: Buffer,
-    originalDocumentName: string,
-    originalAudioName: string,
-    matchOptions: DocumentAudioMatchDto
-  ): Promise<DocumentAudioMatchResponseDto> {
-    this.logger.log(`开始文档音频匹配: ${originalDocumentName} + ${originalAudioName}`);
-    
-    try {
-      // 1. 保存音频文件并获取信息
-      const { filePath: audioFilePath, audioUrl, audioInfo } = 
-        await this.audioProcessingService.saveAudioFile(audioBuffer, originalAudioName);
-      
-      // 2. 解析文档内容
-      const documentType = this.getDocumentTypeFromFileName(originalDocumentName);
-      const documentContent = await this.extractTextFromBuffer(documentBuffer, documentType);
-      
-      // 3. 处理文档，获取段落
-      const parsedDocument = await this.parseDocumentContent(documentContent, documentType, matchOptions.title);
-      
-      // 4. 根据策略分割音频
-      const audioSegments = await this.segmentAudio(
-        audioFilePath,
-        matchOptions.segmentStrategy || 'silence',
-        matchOptions
-      );
-      
-      // 5. 保存文档到数据库
-      const savedDocument = await this.saveDocumentToDatabase({
-        ...parsedDocument,
-        originalAudioUrl: audioUrl,
-        originalAudioDuration: audioInfo.duration,
-        matchStrategy: matchOptions.segmentStrategy || 'silence',
-      });
-
-      // 6. 智能匹配段落和音频片段
-      const matchedResults = await this.matchParagraphsWithAudioSegments(
-        savedDocument.paragraphs,
-        audioSegments,
-        audioFilePath,
-        savedDocument.id
-      );
-      
-      // 7. 构建响应
-      const response: DocumentAudioMatchResponseDto = {
-        ...this.formatDocumentResponse(savedDocument),
-        originalAudioUrl: audioUrl,
-        originalAudioDuration: audioInfo.duration,
-        audioSegments: matchedResults.audioSegments,
-        matchStrategy: matchOptions.segmentStrategy || 'silence',
-        needsManualAdjustment: matchedResults.needsManualAdjustment,
-      };
-      
-      this.logger.log(`文档音频匹配完成: ${response.paragraphs.length}个段落, ${response.audioSegments.length}个音频片段`);
-      return response;
-      
-    } catch (error) {
-      this.logger.error(`文档音频匹配失败: ${error.message}`, error.stack);
-      throw new Error(`文档音频匹配失败: ${error.message}`);
-    }
-  }
-
-  /**
    * 根据ID获取文档
    */
   async getDocumentById(id: string): Promise<DocumentResponseDto> {
-    const document = await this.prisma.document.findUnique({
+    const document = await this.prisma.englishDocument.findUnique({
       where: { id },
       include: {
         paragraphs: {
@@ -162,7 +96,7 @@ export class DocumentService {
    * 获取文档列表（支持分页）
    */
   async getDocumentList(skip: number = 0, take: number = 10): Promise<DocumentResponseDto[]> {
-    const documents = await this.prisma.document.findMany({
+    const documents = await this.prisma.englishDocument.findMany({
       skip,
       take,
       include: {
@@ -184,7 +118,7 @@ export class DocumentService {
    */
   async deleteDocument(id: string): Promise<boolean> {
     try {
-      const document = await this.prisma.document.findUnique({
+      const document = await this.prisma.englishDocument.findUnique({
         where: { id },
         include: {
           paragraphs: true,
@@ -200,7 +134,7 @@ export class DocumentService {
       await this.deleteAssociatedAudioFiles(document);
 
       // 删除数据库记录（级联删除会自动删除相关的段落和音频片段）
-      await this.prisma.document.delete({
+      await this.prisma.englishDocument.delete({
         where: { id }
       });
 
@@ -237,47 +171,162 @@ export class DocumentService {
   }
 
   /**
-   * 检查是否为文档文件
+   * 文档与音频智能匹配
    */
-  isDocumentFile(file: Express.Multer.File): boolean {
-    const documentMimeTypes = [
-      'text/plain',
-      'application/pdf',
-      'application/msword',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-    ];
+  async matchDocumentWithAudio(
+    documentBuffer: Buffer,
+    audioBuffer: Buffer,
+    originalDocumentName: string,
+    originalAudioName: string,
+    matchOptions: any
+  ): Promise<any> {
+    this.logger.log(`开始文档音频匹配: ${originalDocumentName} + ${originalAudioName}`);
     
-    if (documentMimeTypes.includes(file.mimetype)) {
-      return true;
+    try {
+      // 1. 保存音频文件并获取信息
+      const { filePath: audioFilePath, audioUrl, audioInfo } = 
+        await this.audioProcessingService.saveAudioFile(audioBuffer, originalAudioName);
+      
+      // 2. 解析文档内容
+      const documentType = this.getDocumentTypeFromFileName(originalDocumentName);
+      const documentContent = await this.extractTextFromBuffer(documentBuffer, documentType);
+      
+      // 3. 处理文档，获取段落
+      const parsedDocument = await this.parseDocumentContent(documentContent, documentType, matchOptions.title);
+      
+      // 4. 根据段落数量智能分割音频
+      const audioSegments = await this.audioProcessingService.segmentByTextParagraphs(
+        audioFilePath,
+        parsedDocument.paragraphs.length,
+        audioInfo.duration
+      );
+      
+      // 5. 保存文档到数据库
+      const savedDocument = await this.saveDocumentToDatabase({
+        ...parsedDocument,
+        originalAudioUrl: audioUrl,
+        originalAudioDuration: audioInfo.duration,
+        matchStrategy: matchOptions.segmentStrategy || 'smart',
+      });
+
+      // 6. 为每个段落生成对应的音频片段
+      const matchedResults = await this.matchParagraphsWithAudioSegments(
+        savedDocument.paragraphs,
+        audioSegments,
+        audioFilePath,
+        savedDocument.id
+      );
+      
+      // 7. 构建响应
+      const response = {
+        ...this.formatDocumentResponse(savedDocument),
+        originalAudioUrl: audioUrl,
+        originalAudioDuration: audioInfo.duration,
+        audioSegments: matchedResults.audioSegments,
+        matchStrategy: matchOptions.segmentStrategy || 'smart',
+        needsManualAdjustment: matchedResults.needsManualAdjustment,
+      };
+      
+      this.logger.log(`文档音频匹配完成: ${response.paragraphs.length}个段落, ${response.audioSegments.length}个音频片段`);
+      return response;
+      
+    } catch (error) {
+      this.logger.error(`文档音频匹配失败: ${error.message}`, error.stack);
+      throw new Error(`文档音频匹配失败: ${error.message}`);
     }
-    
-    const extension = file.originalname.toLowerCase().split('.').pop();
-    return ['txt', 'pdf', 'doc', 'docx'].includes(extension || '');
   }
 
   /**
-   * 检查是否为音频文件
+   * 智能匹配段落和音频片段
    */
-  isAudioFile(file: Express.Multer.File): boolean {
-    const audioMimeTypes = [
-      'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/wave',
-      'audio/x-wav', 'audio/mp4', 'audio/m4a', 'audio/aac',
-      'audio/ogg', 'audio/webm'
-    ];
+  private async matchParagraphsWithAudioSegments(
+    paragraphs: any[],
+    audioSegments: any[],
+    audioFilePath: string,
+    documentId: string
+  ): Promise<{
+    audioSegments: any[];
+    needsManualAdjustment: boolean;
+  }> {
+    const processedAudioSegments: any[] = [];
     
-    if (audioMimeTypes.includes(file.mimetype)) {
-      return true;
+    // 生成音频片段文件
+    const segmentResults = await this.audioProcessingService.generateSegmentAudios(
+      audioFilePath,
+      audioSegments,
+      documentId
+    );
+    
+    // 为每个段落关联音频片段
+    for (let i = 0; i < Math.min(paragraphs.length, segmentResults.length); i++) {
+      const paragraph = paragraphs[i];
+      const segmentResult = segmentResults[i];
+      
+      if (segmentResult) {
+        // 更新段落的音频信息
+        await this.prisma.englishParagraph.update({
+          where: { id: paragraph.id },
+          data: {
+            audioUrl: segmentResult.audioUrl,
+            audioFileName: segmentResult.segmentId,
+            audioDuration: segmentResult.segment.duration,
+          }
+        });
+        
+        processedAudioSegments.push({
+          id: segmentResult.segmentId,
+          startTime: segmentResult.segment.startTime,
+          endTime: segmentResult.segment.endTime,
+          segmentAudioUrl: segmentResult.audioUrl,
+          duration: segmentResult.segment.duration,
+          order: i + 1,
+          paragraphId: paragraph.id,
+        });
+      }
     }
     
-    const extension = file.originalname.toLowerCase().split('.').pop();
-    return ['mp3', 'wav', 'wave', 'm4a', 'aac', 'ogg', 'webm'].includes(extension || '');
+    // 判断是否需要手动调整
+    const ratio = Math.abs(paragraphs.length - audioSegments.length) / Math.max(paragraphs.length, audioSegments.length);
+    const needsManualAdjustment = ratio > 0.2;
+    
+    return {
+      audioSegments: processedAudioSegments,
+      needsManualAdjustment,
+    };
   }
 
   /**
-   * 获取不带扩展名的文件名
+   * 根据文件名获取文档类型
    */
-  getFileNameWithoutExtension(filename: string): string {
-    return filename.replace(/\.[^/.]+$/, '');
+  private getDocumentTypeFromFileName(fileName: string): DocumentType {
+    const extension = fileName.toLowerCase().split('.').pop();
+    switch (extension) {
+      case 'txt':
+        return DocumentType.TEXT;
+      case 'pdf':
+        return DocumentType.PDF;
+      case 'doc':
+      case 'docx':
+        return DocumentType.WORD;
+      default:
+        return DocumentType.TEXT;
+    }
+  }
+
+  /**
+   * 从Buffer中提取文本内容
+   */
+  private async extractTextFromBuffer(buffer: Buffer, type: DocumentType): Promise<string> {
+    switch (type) {
+      case DocumentType.TEXT:
+        return buffer.toString('utf-8');
+      case DocumentType.PDF:
+        return await this.extractPdfText(buffer);
+      case DocumentType.WORD:
+        return await this.extractWordText(buffer);
+      default:
+        throw new Error(`不支持的文档类型: ${type}`);
+    }
   }
 
   // =================== 私有方法 ===================
@@ -363,12 +412,12 @@ export class DocumentService {
    * 保存文档到数据库
    */
   private async saveDocumentToDatabase(documentData: any) {
-    return await this.prisma.document.create({
+    return await this.prisma.englishDocument.create({
       data: {
         id: documentData.id,
         title: documentData.title,
         content: documentData.content,
-        type: documentData.type,
+        type: documentData.type.toUpperCase(),
         wordCount: documentData.wordCount,
         sentenceCount: documentData.sentenceCount,
         paragraphCount: documentData.paragraphCount,
@@ -411,7 +460,7 @@ export class DocumentService {
         });
 
         // 更新段落的音频信息
-        await this.prisma.paragraph.update({
+        await this.prisma.englishParagraph.update({
           where: { id: paragraph.id },
           data: {
             audioUrl: speechResponse.audioUrl,
@@ -423,252 +472,6 @@ export class DocumentService {
         this.logger.log(`段落 ${paragraph.order} 语音生成成功`);
       } catch (error) {
         this.logger.error(`段落 ${paragraph.order} 语音生成失败: ${error.message}`);
-      }
-    }
-  }
-
-  /**
-   * 根据策略分割音频
-   */
-  private async segmentAudio(
-    audioFilePath: string,
-    strategy: string,
-    options: DocumentAudioMatchDto
-  ): Promise<any[]> {
-    switch (strategy) {
-      case 'silence':
-        return await this.audioProcessingService.segmentBysilence(
-          audioFilePath,
-          options.silenceThreshold || 0.01,
-          options.minSilenceDuration || 1.0
-        );
-      
-      case 'time':
-        return await this.audioProcessingService.segmentByTime(
-          audioFilePath,
-          options.segmentDuration || 30
-        );
-      
-      case 'manual':
-        const audioInfo = await this.audioProcessingService.getAudioInfo(audioFilePath);
-        return [{
-          startTime: 0,
-          endTime: audioInfo.duration,
-          duration: audioInfo.duration,
-        }];
-      
-      default:
-        throw new Error(`不支持的分段策略: ${strategy}`);
-    }
-  }
-
-  /**
-   * 智能匹配段落和音频片段
-   */
-  private async matchParagraphsWithAudioSegments(
-    paragraphs: any[],
-    audioSegments: any[],
-    audioFilePath: string,
-    documentId: string
-  ): Promise<{
-    paragraphs: ParagraphDto[];
-    audioSegments: AudioSegmentDto[];
-    needsManualAdjustment: boolean;
-  }> {
-    const processedAudioSegments: AudioSegmentDto[] = [];
-    
-    const paragraphCount = paragraphs.length;
-    const segmentCount = audioSegments.length;
-    const ratio = Math.abs(paragraphCount - segmentCount) / Math.max(paragraphCount, segmentCount);
-    
-    let needsManualAdjustment = ratio > 0.3;
-    
-    if (ratio <= 0.2) {
-      await this.oneToOneMatch(paragraphs, audioSegments, audioFilePath, documentId, processedAudioSegments);
-    } else if (segmentCount > paragraphCount) {
-      await this.mergeAudioSegments(paragraphs, audioSegments, audioFilePath, documentId, processedAudioSegments);
-    } else {
-      await this.splitAudioSegments(paragraphs, audioSegments, audioFilePath, documentId, processedAudioSegments);
-    }
-    
-    return {
-      paragraphs: paragraphs.map(p => ({
-        id: p.id,
-        content: p.content,
-        order: p.orderNum,
-        wordCount: p.wordCount,
-        sentences: p.sentences,
-        audioUrl: p.audioUrl,
-        audioFileName: p.audioFileName,
-        audioDuration: p.audioDuration,
-      })),
-      audioSegments: processedAudioSegments,
-      needsManualAdjustment,
-    };
-  }
-
-  /**
-   * 一对一匹配
-   */
-  private async oneToOneMatch(
-    paragraphs: any[],
-    audioSegments: any[],
-    audioFilePath: string,
-    documentId: string,
-    processedAudioSegments: AudioSegmentDto[]
-  ): Promise<void> {
-    const minLength = Math.min(paragraphs.length, audioSegments.length);
-    
-    const segmentResults = await this.audioProcessingService.generateSegmentAudios(
-      audioFilePath,
-      audioSegments.slice(0, minLength),
-      documentId
-    );
-    
-    for (let i = 0; i < minLength; i++) {
-      const paragraph = paragraphs[i];
-      const segmentResult = segmentResults[i];
-      
-      if (segmentResult) {
-        await this.prisma.paragraph.update({
-          where: { id: paragraph.id },
-          data: {
-            audioUrl: segmentResult.audioUrl,
-            audioFileName: segmentResult.segmentId,
-            audioDuration: segmentResult.segment.duration,
-          }
-        });
-        
-        processedAudioSegments.push({
-          id: segmentResult.segmentId,
-          startTime: segmentResult.segment.startTime,
-          endTime: segmentResult.segment.endTime,
-          segmentAudioUrl: segmentResult.audioUrl,
-          duration: segmentResult.segment.duration,
-          order: i + 1,
-        });
-      } else {
-        this.logger.warn(`第${i + 1}个段落的音频生成失败，跳过`);
-      }
-    }
-  }
-
-  /**
-   * 合并音频片段策略
-   */
-  private async mergeAudioSegments(
-    paragraphs: any[],
-    audioSegments: any[],
-    audioFilePath: string,
-    documentId: string,
-    processedAudioSegments: AudioSegmentDto[]
-  ): Promise<void> {
-    const segmentsPerParagraph = Math.ceil(audioSegments.length / paragraphs.length);
-    
-    for (let i = 0; i < paragraphs.length; i++) {
-      const startIndex = i * segmentsPerParagraph;
-      const endIndex = Math.min(startIndex + segmentsPerParagraph, audioSegments.length);
-      const segmentsToMerge = audioSegments.slice(startIndex, endIndex);
-      
-      if (segmentsToMerge.length > 0) {
-        const mergedSegment = {
-          startTime: segmentsToMerge[0].startTime,
-          endTime: segmentsToMerge[segmentsToMerge.length - 1].endTime,
-          duration: segmentsToMerge[segmentsToMerge.length - 1].endTime - segmentsToMerge[0].startTime,
-        };
-        
-        const segmentId = uuidv4();
-        const outputFileName = `${documentId}_merged_segment_${i + 1}_${segmentId}.mp3`;
-        
-        try {
-          const audioUrl = await this.audioProcessingService.extractAudioSegment(
-            audioFilePath,
-            mergedSegment.startTime,
-            mergedSegment.duration,
-            outputFileName
-          );
-          
-          await this.prisma.paragraph.update({
-            where: { id: paragraphs[i].id },
-            data: {
-              audioUrl: audioUrl,
-              audioFileName: segmentId,
-              audioDuration: mergedSegment.duration,
-            }
-          });
-          
-          processedAudioSegments.push({
-            id: segmentId,
-            startTime: mergedSegment.startTime,
-            endTime: mergedSegment.endTime,
-            segmentAudioUrl: audioUrl,
-            duration: mergedSegment.duration,
-            order: i + 1,
-          });
-        } catch (error) {
-          this.logger.error(`合并音频片段失败: ${error.message}`);
-        }
-      }
-    }
-  }
-
-  /**
-   * 分割音频片段策略
-   */
-  private async splitAudioSegments(
-    paragraphs: any[],
-    audioSegments: any[],
-    audioFilePath: string,
-    documentId: string,
-    processedAudioSegments: AudioSegmentDto[]
-  ): Promise<void> {
-    const paragraphsPerSegment = Math.ceil(paragraphs.length / audioSegments.length);
-    
-    for (let i = 0; i < audioSegments.length; i++) {
-      const segment = audioSegments[i];
-      const startParagraphIndex = i * paragraphsPerSegment;
-      const endParagraphIndex = Math.min(startParagraphIndex + paragraphsPerSegment, paragraphs.length);
-      const paragraphsForThisSegment = paragraphs.slice(startParagraphIndex, endParagraphIndex);
-      
-      const subSegmentDuration = segment.duration / paragraphsForThisSegment.length;
-      
-      for (let j = 0; j < paragraphsForThisSegment.length; j++) {
-        const paragraph = paragraphsForThisSegment[j];
-        const subSegmentStart = segment.startTime + (j * subSegmentDuration);
-        const subSegmentEnd = Math.min(subSegmentStart + subSegmentDuration, segment.endTime);
-        const subSegmentDur = subSegmentEnd - subSegmentStart;
-        
-        const segmentId = uuidv4();
-        const outputFileName = `${documentId}_split_segment_${startParagraphIndex + j + 1}_${segmentId}.mp3`;
-        
-        try {
-          const audioUrl = await this.audioProcessingService.extractAudioSegment(
-            audioFilePath,
-            subSegmentStart,
-            subSegmentDur,
-            outputFileName
-          );
-          
-          await this.prisma.paragraph.update({
-            where: { id: paragraph.id },
-            data: {
-              audioUrl: audioUrl,
-              audioFileName: segmentId,
-              audioDuration: subSegmentDur,
-            }
-          });
-          
-          processedAudioSegments.push({
-            id: segmentId,
-            startTime: subSegmentStart,
-            endTime: subSegmentEnd,
-            segmentAudioUrl: audioUrl,
-            duration: subSegmentDur,
-            order: startParagraphIndex + j + 1,
-          });
-        } catch (error) {
-          this.logger.error(`分割音频片段失败: ${error.message}`);
-        }
       }
     }
   }
@@ -751,39 +554,5 @@ export class DocumentService {
       .split(/\s+/)
       .filter(word => word.length > 0 && /[a-zA-Z]/.test(word))
       .length;
-  }
-
-  /**
-   * 根据文件名获取文档类型
-   */
-  private getDocumentTypeFromFileName(fileName: string): DocumentType {
-    const extension = fileName.toLowerCase().split('.').pop();
-    switch (extension) {
-      case 'txt':
-        return DocumentType.TEXT;
-      case 'pdf':
-        return DocumentType.PDF;
-      case 'doc':
-      case 'docx':
-        return DocumentType.WORD;
-      default:
-        return DocumentType.TEXT;
-    }
-  }
-
-  /**
-   * 从Buffer中提取文本内容
-   */
-  private async extractTextFromBuffer(buffer: Buffer, type: DocumentType): Promise<string> {
-    switch (type) {
-      case DocumentType.TEXT:
-        return buffer.toString('utf-8');
-      case DocumentType.PDF:
-        return await this.extractPdfText(buffer);
-      case DocumentType.WORD:
-        return await this.extractWordText(buffer);
-      default:
-        throw new Error(`不支持的文档类型: ${type}`);
-    }
   }
 }

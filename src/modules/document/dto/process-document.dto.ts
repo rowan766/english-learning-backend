@@ -3,9 +3,9 @@ import { IsString, IsOptional, IsEnum, IsArray } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export enum DocumentType {
-  TEXT = 'text',
-  PDF = 'pdf',
-  WORD = 'word',
+  TEXT = 'TEXT',
+  PDF = 'PDF',
+  WORD = 'WORD',
 }
 
 export class ProcessDocumentDto {

@@ -1,6 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -10,90 +7,292 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// 文档表
-model Document {
-  id                      String    @id @default(uuid())
-  title                   String
-  content                 String    @db.Text
-  type                    DocumentType
-  wordCount               Int       @default(0) @map("word_count")
-  sentenceCount           Int       @default(0) @map("sentence_count") 
-  paragraphCount          Int       @default(0) @map("paragraph_count")
-  originalAudioUrl        String?   @map("original_audio_url")
-  originalAudioDuration   Float?    @map("original_audio_duration")
-  matchStrategy           String?   @map("match_strategy")
-  needsManualAdjustment   Boolean   @default(false) @map("needs_manual_adjustment")
-  createdAt               DateTime  @default(now()) @map("created_at")
-  updatedAt               DateTime  @updatedAt @map("updated_at")
-  
-  // 关联关系
-  paragraphs              Paragraph[]
-  audioSegments           AudioSegment[]
-  userProgress            UserProgress[]
-  
-  @@map("documents")
+model RagDocument {
+  id                  String              @id @default(cuid())
+  title               String
+  filename            String
+  original_name       String
+  mime_type           String
+  size                Int
+  path                String
+  content             String?
+  summary             String?
+  language            String?
+  page_count          Int?
+  word_count          Int?
+  status              rag_document_status @default(UPLOADED)
+  error_message       String?
+  created_at          DateTime            @default(now())
+  updated_at          DateTime
+  processed_at        DateTime?
+  user_id             String
+  rag_document_chunks RagDocumentChunk[]
+  users               User                @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("rag_documents")
 }
 
-// 段落表
-model Paragraph {
-  id                String    @id @default(uuid())
-  documentId        String    @map("document_id")
-  content           String    @db.Text
-  orderNum          Int       @map("order_num")
-  wordCount         Int       @default(0) @map("word_count")
-  sentences         Json      // 存储句子数组
-  audioUrl          String?   @map("audio_url")
-  audioFileName     String?   @map("audio_file_name")
-  audioDuration     Float?    @map("audio_duration")
-  createdAt         DateTime  @default(now()) @map("created_at")
-  
-  // 关联关系
-  document          Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  
-  @@map("paragraphs")
-  @@index([documentId, orderNum])
+model RagDocumentChunk {
+  id            String      @id @default(cuid())
+  content       String
+  metadata      Json?
+  embedding     String?
+  token_count   Int?
+  chunk_index   Int
+  start_char    Int?
+  end_char      Int?
+  created_at    DateTime    @default(now())
+  updated_at    DateTime
+  document_id   String
+  rag_documents RagDocument @relation(fields: [document_id], references: [id], onDelete: Cascade)
+
+  @@index([document_id])
+  @@map("rag_document_chunks")
 }
 
-// 音频片段表
-model AudioSegment {
-  id                String    @id @default(uuid())
-  documentId        String    @map("document_id")
-  paragraphId       String?   @map("paragraph_id")
-  startTime         Float     @map("start_time")
-  endTime           Float     @map("end_time")
+model RagChatSession {
+  id                String           @id @default(cuid())
+  title             String?
+  description       String?
+  system_prompt     String?
+  model             String           @default("gpt-3.5-turbo")
+  temperature       Float            @default(0.7)
+  max_tokens        Int?
+  is_active         Boolean          @default(true)
+  created_at        DateTime         @default(now())
+  updated_at        DateTime
+  user_id           String
+  rag_chat_messages RagChatMessage[]
+  users             User             @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("rag_chat_sessions")
+}
+
+model RagChatMessage {
+  id                String           @id @default(cuid())
+  content           String
+  role              rag_message_role
+  context           Json?
+  sources           String[]
+  metadata          Json?
+  token_count       Int?
+  created_at        DateTime         @default(now())
+  session_id        String
+  rag_chat_sessions RagChatSession   @relation(fields: [session_id], references: [id], onDelete: Cascade)
+
+  @@index([session_id, created_at])
+  @@map("rag_chat_messages")
+}
+
+model User {
+  id                String           @id @default(cuid())
+  email             String           @unique
+  username          String?          @unique
+  password          String?
+  avatar            String?
+  role              users_role_enum  @default(user)
+  created_at        DateTime?        @default(now())
+  updated_at        DateTime?
+  articles          articles[]
+  comments          comments[]
+  rag_chat_sessions RagChatSession[]
+  rag_documents     RagDocument[]
+
+  @@map("users")
+}
+
+model articles {
+  id                 String               @id
+  title              String
+  content            String?
+  slug               String?
+  status             articles_status_enum @default(draft)
+  authorId           String
+  categoryId         String?
+  created_at         DateTime?            @default(now())
+  updated_at         DateTime?
+  users              User                 @relation(fields: [authorId], references: [id])
+  categories         categories?          @relation(fields: [categoryId], references: [id])
+  articles_tags_tags articles_tags_tags[]
+  comments           comments[]
+}
+
+model articles_tags_tags {
+  articlesId String
+  tagsId     String
+  articles   articles @relation(fields: [articlesId], references: [id])
+  tags       tags     @relation(fields: [tagsId], references: [id])
+
+  @@id([articlesId, tagsId])
+}
+
+model blog_posts {
+  id          String    @id
+  title       String
+  slug        String    @unique
+  content     String?
+  excerpt     String?
+  published   Boolean   @default(false)
+  publishedAt DateTime?
+  created_at  DateTime? @default(now())
+  updated_at  DateTime?
+}
+
+model categories {
+  id          String     @id
+  name        String     @unique
+  slug        String     @unique
+  description String?
+  created_at  DateTime?  @default(now())
+  updated_at  DateTime?
+  articles    articles[]
+}
+
+model comments {
+  id         String               @id
+  content    String
+  status     comments_status_enum @default(pending)
+  authorId   String
+  articleId  String
+  created_at DateTime?            @default(now())
+  updated_at DateTime?
+  articles   articles             @relation(fields: [articleId], references: [id])
+  users      User                 @relation(fields: [authorId], references: [id])
+}
+
+model rag_system_configs {
+  id          String   @id
+  key         String   @unique
+  value       Json
+  description String?
+  category    String?
+  created_at  DateTime @default(now())
+  updated_at  DateTime
+}
+
+model rag_usage_stats {
+  id              String   @id
+  date            DateTime @unique @db.Date
+  total_queries   Int      @default(0)
+  total_tokens    Int      @default(0)
+  total_documents Int      @default(0)
+  active_users    Int      @default(0)
+  estimated_cost  Float    @default(0)
+  created_at      DateTime @default(now())
+}
+
+model tags {
+  id                 String               @id
+  name               String               @unique
+  slug               String               @unique
+  description        String?
+  created_at         DateTime?            @default(now())
+  updated_at         DateTime?
+  articles_tags_tags articles_tags_tags[]
+}
+
+enum articles_status_enum {
+  draft
+  published
+  archived
+}
+
+enum comments_status_enum {
+  pending
+  approved
+  rejected
+}
+
+enum rag_document_status {
+  UPLOADED
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
+enum rag_message_role {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+enum users_role_enum {
+  admin
+  user
+}
+
+// ===== 英语学习应用的新模型（添加到 schema.prisma 末尾） =====
+
+model EnglishDocument {
+  id          String   @id @default(cuid())
+  title       String
+  content     String
+  type        DocumentType
+  wordCount   Int
+  sentenceCount Int
+  paragraphCount Int
+  originalAudioUrl String?
+  originalAudioDuration Float?
+  matchStrategy String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  paragraphs     EnglishParagraph[]
+  audioSegments  EnglishAudioSegment[]
+  
+  @@map("english_documents")
+}
+
+model EnglishParagraph {
+  id            String   @id @default(cuid())
+  content       String
+  orderNum      Int
+  wordCount     Int
+  sentences     String[]
+  audioUrl      String?
+  audioFileName String?
+  audioDuration Float?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  documentId    String
+  document      EnglishDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  
+  @@map("english_paragraphs")
+}
+
+model EnglishSpeechRecord {
+  id           String   @id @default(cuid())
+  cacheKey     String   @unique
+  fileName     String
+  audioUrl     String
+  duration     Float
+  voiceId      String
+  outputFormat String
+  originalText String
+  wordCount    Int
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  
+  @@map("english_speech_records")
+}
+
+model EnglishAudioSegment {
+  id                String   @id @default(cuid())
+  startTime         Float
+  endTime           Float
+  segmentAudioUrl   String
   duration          Float
-  segmentAudioUrl   String    @map("segment_audio_url")
-  orderNum          Int       @map("order_num")
-  createdAt         DateTime  @default(now()) @map("created_at")
+  orderNum          Int
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
   
-  // 关联关系
-  document          Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentId        String
+  document          EnglishDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
   
-  @@map("audio_segments")
-  @@index([documentId, orderNum])
+  @@map("english_audio_segments")
 }
 
-// 用户学习进度表（可选，为未来扩展）
-model UserProgress {
-  id              String    @id @default(uuid())
-  userId          String?   @map("user_id") // 未来用户系统
-  documentId      String    @map("document_id")
-  paragraphId     String?   @map("paragraph_id")
-  currentPosition Float     @default(0) @map("current_position")
-  totalStudyTime  Int       @default(0) @map("total_study_time") // 秒
-  lastStudiedAt   DateTime  @default(now()) @map("last_studied_at")
-  studyCount      Int       @default(0) @map("study_count")
-  isFavorite      Boolean   @default(false) @map("is_favorite")
-  notes           String?   @db.Text
-  
-  // 关联关系
-  document        Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  
-  @@map("user_progress")
-  @@index([userId, documentId])
-}
-
-// 枚举类型
 enum DocumentType {
   TEXT
   PDF
